@@ -2,6 +2,8 @@
 
 # OpenFill
 
+> **PhotoCraft Workflow Tools** is a community fork of [Beckett Harriman's OpenFill](https://github.com/beckettharriman/openfill). See the [fork guide](photocraft/WORKFLOW-TOOLS.md) for the resolution selector, model memory controls, and smart removal brush. The upstream license and notices still apply.
+
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE) ![OpenFill for PhotoCraft 0.2.7](https://img.shields.io/badge/OpenFill%20for%20PhotoCraft-0.2.7-30a2ff.svg) ![Works with PhotoCraft 0.12 to 0.23](https://img.shields.io/badge/works%20with%20PhotoCraft-0.12%20to%200.23-444.svg) ![GIMP 3.2](https://img.shields.io/badge/GIMP-3.2-444.svg) ![Python + ComfyUI](https://img.shields.io/badge/made%20with-Python%20%2B%20ComfyUI-orange.svg) ![Local](https://img.shields.io/badge/100%25-local-30d158.svg) ![Beta](https://img.shields.io/badge/status-beta-e8a33d.svg)
 
 *Generative fill, expand and object removal for PhotoCraft and GIMP 3, running on your graphics card. Local generation stays on your computer.*

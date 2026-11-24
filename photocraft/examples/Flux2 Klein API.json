@@ -1,0 +1,201 @@
+{
+  "load": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "openfill-input.png"
+    }
+  },
+  "model": {
+    "class_type": "UNETLoader",
+    "inputs": {
+      "unet_name": "flux-2-klein-9b-fp8.safetensors",
+      "weight_dtype": "default"
+    }
+  },
+  "clip": {
+    "class_type": "CLIPLoader",
+    "inputs": {
+      "clip_name": "qwen_3_8b_fp8mixed.safetensors",
+      "type": "flux2",
+      "device": "default"
+    }
+  },
+  "vae": {
+    "class_type": "VAELoader",
+    "inputs": {
+      "vae_name": "flux2-vae.safetensors"
+    }
+  },
+  "positive": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "clip": [
+        "clip",
+        0
+      ],
+      "text": ""
+    }
+  },
+  "negative": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "clip": [
+        "clip",
+        0
+      ],
+      "text": ""
+    }
+  },
+  "encode": {
+    "class_type": "VAEEncode",
+    "inputs": {
+      "pixels": [
+        "load",
+        0
+      ],
+      "vae": [
+        "vae",
+        0
+      ]
+    }
+  },
+  "pos_ref": {
+    "class_type": "ReferenceLatent",
+    "inputs": {
+      "conditioning": [
+        "positive",
+        0
+      ],
+      "latent": [
+        "encode",
+        0
+      ]
+    }
+  },
+  "neg_ref": {
+    "class_type": "ReferenceLatent",
+    "inputs": {
+      "conditioning": [
+        "negative",
+        0
+      ],
+      "latent": [
+        "encode",
+        0
+      ]
+    }
+  },
+  "mask": {
+    "class_type": "SetLatentNoiseMask",
+    "inputs": {
+      "samples": [
+        "encode",
+        0
+      ],
+      "mask": [
+        "load",
+        1
+      ]
+    }
+  },
+  "size": {
+    "class_type": "GetImageSize",
+    "inputs": {
+      "image": [
+        "load",
+        0
+      ]
+    }
+  },
+  "scheduler": {
+    "class_type": "Flux2Scheduler",
+    "inputs": {
+      "steps": 4,
+      "width": [
+        "size",
+        0
+      ],
+      "height": [
+        "size",
+        1
+      ]
+    }
+  },
+  "guider": {
+    "class_type": "CFGGuider",
+    "inputs": {
+      "model": [
+        "model",
+        0
+      ],
+      "positive": [
+        "pos_ref",
+        0
+      ],
+      "negative": [
+        "neg_ref",
+        0
+      ],
+      "cfg": 1
+    }
+  },
+  "sampler_choice": {
+    "class_type": "KSamplerSelect",
+    "inputs": {
+      "sampler_name": "euler"
+    }
+  },
+  "noise": {
+    "class_type": "RandomNoise",
+    "inputs": {
+      "noise_seed": 0
+    }
+  },
+  "sample": {
+    "class_type": "SamplerCustomAdvanced",
+    "inputs": {
+      "noise": [
+        "noise",
+        0
+      ],
+      "guider": [
+        "guider",
+        0
+      ],
+      "sampler": [
+        "sampler_choice",
+        0
+      ],
+      "sigmas": [
+        "scheduler",
+        0
+      ],
+      "latent_image": [
+        "mask",
+        0
+      ]
+    }
+  },
+  "decode": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": [
+        "sample",
+        0
+      ],
+      "vae": [
+        "vae",
+        0
+      ]
+    }
+  },
+  "preview": {
+    "class_type": "PreviewImage",
+    "inputs": {
+      "images": [
+        "decode",
+        0
+      ]
+    }
+  }
+}

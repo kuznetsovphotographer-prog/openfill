@@ -1,0 +1,15 @@
+{
+  "flux2-klein": {
+    "label": "FLUX.2 Klein (local workflow)",
+    "file": "Flux2 Klein API.json",
+    "inputs": "image=load, prompt=positive.text, negative=negative.text, seed=noise.noise_seed, output=preview",
+    "remove_prompt": "Remove the selected object and reconstruct the surrounding background naturally."
+  },
+  "qwen-edit": {
+    "label": "Qwen Image Edit (local workflow)",
+    "file": "Qwen Edit API.json",
+    "inputs": "image=load, prompt=condition.prompt, negative=condition.negative_prompt, seed=noise.noise_seed, output=preview",
+    "remove_prompt": "Remove the object marked magenta and restore the natural background. Keep everything else unchanged.",
+    "mark_selection": true
+  }
+}

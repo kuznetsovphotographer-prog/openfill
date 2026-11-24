@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 The version numbers below (0.2.x) are OpenFill for PhotoCraft's own, not PhotoCraft's.
 Each entry from now on says which PhotoCraft versions it works with.
 
+## [Workflow Tools] — community changes based on 0.2.7
+
+- Add an explicit 1–4 MP generation resolution beneath Model, including named local Klein and Qwen workflows.
+- Preload the selected model and release the local ComfyUI cache from the panel header.
+- Add a zoomable smart removal brush and opt-in automatic removal after a completed lasso.
+- Generate disconnected Fill, Remove and Create → Layer selections in separate layers. Keep finished areas after cancellation.
+- Allow multiple named local workflows and honor explicit model selection in Fill, including with an empty prompt.
+
 ## [0.2.7] - 2026-11-20 · works with PhotoCraft 0.12 to 0.23
 
 Works with PhotoCraft 0.21, 0.22, 0.23 and 0.23.1:

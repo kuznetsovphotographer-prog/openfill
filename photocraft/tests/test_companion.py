@@ -1,4 +1,5 @@
 # OpenFill for PhotoCraft
+# Modified in the PhotoCraft Workflow Tools fork.
 # SPDX-License-Identifier: Apache-2.0
 """Unit tests for the PhotoCraft companion: control client, bridge and page API, without PhotoCraft."""
 
@@ -1698,11 +1699,11 @@ class MenuTests(unittest.TestCase):
         self.assertEqual((pc.installed, len(said)), ([], 1))  # still open: tried again, quietly
         pc.dialog = False
         watcher.poll()
-        self.assertEqual(len(pc.installed), 1)
-        self.assertEqual(said[-1], "Filter > Plug-ins: OpenFill")
+        self.assertEqual(len(pc.installed), len(menu.ENTRIES))
+        self.assertEqual(said[-1], menu.install_message([label for _, label in menu.ENTRIES], ""))
         self.assertEqual(pc.removed, [menu.PLUGIN_PREFIX + a for a in menu.OLD_ACTIONS])  # once it is in
         watcher.poll()
-        self.assertEqual(len(pc.installed), 1)  # in: not added again
+        self.assertEqual(len(pc.installed), len(menu.ENTRIES))  # in: not added again
 
     def test_the_menu_entry_is_tried_again_only_now_and_then(self):
         from openfill_photocraft import menu
@@ -2621,13 +2622,23 @@ class ServiceRemoveTests(unittest.TestCase):
 
         class App:
             def generative_fill(
-                self, image, prompt, negative, variations, strength, seed, model, remove=False, as_picked=False
+                self,
+                image,
+                prompt,
+                negative,
+                variations,
+                strength,
+                seed,
+                model,
+                remove=False,
+                as_picked=False,
+                megapixels=None,
             ):
                 calls.append((prompt, variations, strength, model, remove))
                 picked.append(as_picked)
                 return [SimpleNamespace(name="x")]
 
-        stub = SimpleNamespace(app=App(), OLD_REMOVALS=Service.OLD_REMOVALS)
+        stub = SimpleNamespace(app=App(), OLD_REMOVALS=Service.OLD_REMOVALS, _custom_label=Service._custom_label)
         image = SimpleNamespace(pending_group="g")
         layers = Service._remove(stub, image, {"removal": removal} if removal is not None else {}, 5, 2)
         self.assertEqual(len(calls), 1)  # one pass, never LaMa then a second model
@@ -3683,6 +3694,7 @@ console.log(JSON.stringify(out));
         from openfill_photocraft import bar as barmod
 
         from openfill import ui_text
+        from openfill.named_fill import CUSTOM_WORKFLOW_ID
 
         self.assertEqual(barmod.CUSTOM_ONE, ui_text.CUSTOM_WORKFLOW_ONE)
         laid_out = []
@@ -3690,7 +3702,7 @@ console.log(JSON.stringify(out));
         bar._shown, bar.view = {}, ""
         bar._layout_main = lambda: laid_out.append(dict(bar._shown))
         bar.tab = SimpleNamespace(get=lambda: "fill")
-        bar._model_ids = {"DreamShaper 8": "dreamshaper-8", "Custom workflow (mine)": barmod.CUSTOM_WORKFLOW_ID}
+        bar._model_ids = {"DreamShaper 8": "dreamshaper-8", "Custom workflow (mine)": CUSTOM_WORKFLOW_ID}
         choice = {"label": "DreamShaper 8"}
         bar.model_choice = SimpleNamespace(get=lambda: choice["label"], set=lambda v: choice.update(label=v))
         bar._sync_custom()
@@ -3700,10 +3712,10 @@ console.log(JSON.stringify(out));
         self.assertTrue(bar._shown["custom"])  # the Variations row goes, the hint line comes
         self.assertEqual(len(laid_out), 1)
         bar.tab = SimpleNamespace(get=lambda: "remove")
-        self.assertFalse(bar._custom_picked())
+        self.assertTrue(bar._custom_picked())  # named custom Remove workflows are supported too
         page = (ROOT / "photocraft" / "openfill_photocraft" / "static" / "index.html").read_text("utf-8")
         self.assertIn(ui_text.CUSTOM_WORKFLOW_ONE, page)
-        self.assertIn('if(model==="custom-workflow")b.variations=1', page)
+        self.assertIn("if(isCustomWorkflow(model))b.variations=1", page)
 
     def test_engine_view_gemini_ui_rules(self):
         try:
@@ -4475,13 +4487,15 @@ class UpscaleAndCustomWorkflowTests(unittest.TestCase):
             from openfill_photocraft import bar
         except ImportError:
             self.skipTest("no tkinter")
+        from openfill.named_fill import CUSTOM_WORKFLOW_ID
+
         self.assertIn(("upscale", "Upscale"), bar.TABS)
         self.assertEqual(bar.GO["upscale"], "Upscale")
         self.assertEqual(bar.UPSCALE_FACTORS, (2, 4))
         self.assertIn("upscale", bar.WHOLE_IMAGE)
         facts = {
             "models": {
-                "fill": [("dreamshaper-8-inpainting", "DreamShaper 8"), (bar.CUSTOM_WORKFLOW_ID, "Custom workflow (x)")]
+                "fill": [("dreamshaper-8-inpainting", "DreamShaper 8"), (CUSTOM_WORKFLOW_ID, "Custom workflow (x)")]
             }
         }
         self.assertEqual(bar.fill_choices(facts)["Custom workflow (x)"], "custom-workflow")

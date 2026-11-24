@@ -1,4 +1,5 @@
 # OpenFill for PhotoCraft
+# Modified in the PhotoCraft Workflow Tools fork.
 # SPDX-License-Identifier: Apache-2.0
 """OpenFill's entries in PhotoCraft's Filter > Plug-ins menu, and the watch that notices them.
 
@@ -27,10 +28,11 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .control import ControlClient, ControlError, stop_recording
+from .localization import tr
 
 # (action, menu label). The label is also the name of the history step the entry leaves.
-# One entry: everything else is in the OpenFill bar it opens.
-ENTRIES = (("panel", "OpenFill"),)
+# The main panel and a direct entry to the Windows companion's smart-brush preview.
+ENTRIES = (("panel", "OpenFill"), ("brush", f"OpenFill — {tr('brush')}"))
 # Entries earlier versions added (removed from a PhotoCraft that still has them).
 OLD_ACTIONS = ("fill", "remove", "expand", "txt2img")
 PLUGIN_PREFIX = "app.openfill."
@@ -187,6 +189,22 @@ LABEL_ACTION = {label: action for action, label in ENTRIES}
 SCRATCH_PREFIX = "OpenFill "  # the names of the documents the bridge opens for a moment
 
 
+def committed_lasso(before: list[str], after: list[str], tool: object, d: dict, dialogs) -> bool:
+    """The native freehand Lasso's mouse-up adds a 'Lasso' history state."""
+    if (
+        str(tool).casefold() != "lasso"
+        or dialogs
+        or d.get("canRedo")
+        or d.get("quickMask")
+        or not d.get("hasSelection")
+        or not before
+        or not after
+        or after[-1] != "Lasso"
+    ):
+        return False
+    return after[:-1] == before or (len(before) == len(after) and before != after and after[:-1] == before[1:])
+
+
 @dataclass
 class DocInfo:
     """What the companion shows about PhotoCraft (refreshed by ``Watcher``)."""
@@ -203,6 +221,7 @@ class DocInfo:
     documents: int = 0
     updated: float = 0.0
     waiting: bool = False  # PhotoCraft has stopped answering (window hidden on Wayland)
+    lasso_event: tuple | None = None
 
     def snapshot(self) -> dict[str, Any]:
         if not self.connected:
@@ -214,6 +233,7 @@ class DocInfo:
             "waiting": self.waiting,
             "document": {"name": self.name, "width": self.width, "height": self.height, "mode": self.mode},
             "selection": self.selection,
+            "lasso_event": self.lasso_event,
         }
 
 
@@ -235,6 +255,8 @@ class Watcher:
     log: Callable[[str], None] = print
     _menu_next: float = 0.0
     _recording_left: str = ""  # OpenFill's own action PhotoCraft would not stop recording yet
+    _selection_doc: tuple | None = None
+    _selection_history: list[str] = field(default_factory=list)
 
     def start(self) -> None:
         threading.Thread(target=self._loop, name="openfill-watch", daemon=True).start()
@@ -259,7 +281,7 @@ class Watcher:
         """Add OpenFill to Filter > Plug-ins; when PhotoCraft refuses (one of its dialogs is
         open), ``poll`` tries again until it is in. The labels added."""
         labels, problem = try_install(self.client)
-        self.menu_missing = not labels and "unknown" not in problem  # a PhotoCraft without plug-ins: never
+        self.menu_missing = len(labels) != len(ENTRIES) and "unknown" not in problem
         self._menu_next = time.monotonic() + self.menu_retry
         self.log(install_message(labels, problem))
         return labels
@@ -274,18 +296,20 @@ class Watcher:
             self._recording_left = ""
         if self.menu_missing and time.monotonic() >= self._menu_next:
             labels, problem = try_install(self.client)
+            self.menu_missing = len(labels) != len(ENTRIES) and "unknown" not in problem
             self._menu_next = time.monotonic() + self.menu_retry
-            if labels:
-                self.menu_missing = False
+            if labels or not self.menu_missing:
                 self.log(install_message(labels, problem))
 
     def poll(self) -> str | None:
         """One look at PhotoCraft; the action picked from the menu since the last look, if any."""
         self._tidy()
-        session = self.client.call("ui.inspect").get("session") or {}
+        state = self.client.call("ui.inspect")
+        session = state.get("session") or {}
         docs = session.get("documents") or []
         active = next((d for d in docs if d.get("index") == session.get("active")), None)
         if active is None:
+            self._selection_doc, self._selection_history = None, []
             with self.lock:
                 self.info = DocInfo(connected=True, documents=len(docs), updated=time.time(), waiting=self.info.waiting)
             return None
@@ -304,6 +328,20 @@ class Watcher:
             if self._take_back(key, history, int(d.get("revision") or revision)):
                 d = self.client.run("document.inspect", document=key[0]) or d
         bounds = d.get("selectionBounds") if d.get("hasSelection") else None
+        event = None
+        # Same tab, latest history state, no Undo/Redo or dialog; bounds alone are
+        # insufficient because consecutive lasso shapes can have the same extents.
+        if (
+            bounds
+            and len(bounds) == 4
+            and int(bounds[2]) > 0
+            and int(bounds[3]) > 0
+            and not picked
+            and key == self._selection_doc
+            and committed_lasso(self._selection_history, history, state.get("tool"), d, state.get("dialogs"))
+        ):
+            event = (key[0], key[1], int(d.get("revision") or revision), tuple(int(v) for v in bounds))
+        self._selection_doc, self._selection_history = key, list(d.get("history") or [])
         layer_kind = ""
         for row in d.get("layers") or []:
             if row.get("id") == d.get("activeLayer"):
@@ -321,6 +359,7 @@ class Watcher:
                 documents=len(docs),
                 updated=time.time(),
                 waiting=self.info.waiting,
+                lasso_event=event,
             )
         self._seen[key] = int(d.get("revision") or revision) if picked else revision
         if picked:

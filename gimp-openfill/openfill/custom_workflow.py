@@ -1,4 +1,5 @@
 # OpenFill - generative fill for GIMP 3
+# Modified in the PhotoCraft Workflow Tools fork.
 # Copyright (C) 2026 Beckett Harriman
 # SPDX-License-Identifier: Apache-2.0
 """Custom ComfyUI workflows (Advanced): the user's own graph in ComfyUI's API format,
@@ -488,6 +489,7 @@ def build(
     size: tuple[int, int],
     work_size: tuple[int, int],
     filename_prefix: str = "openfill/custom",
+    megapixels: int | None = None,
 ) -> dict:
     """The graph to queue: the user's workflow with OpenFill's picture, mask, prompt and
     seed filled in, inputs resized to ``work_size`` and the result to ``size``, saved by
@@ -506,6 +508,25 @@ def build(
         graph[node_id]["inputs"][name] = int(seed)
     width, height = int(size[0]), int(size[1])
     work_w, work_h = int(work_size[0]), int(work_size[1])
+    if megapixels is not None:
+        # Qwen Image 2.1 encodes the reference at its own nominal square side
+        # (1024 by default), overriding the resized input unless synchronized.
+        # Match Local Edit's 32-pixel resolution steps and its verified 1 MP preset.
+        resolution = max(1024, math.floor(math.sqrt(megapixels * 1_000_000) / 32 + 0.5) * 32)
+        for node in graph.values():
+            inputs = node["inputs"]
+            if (
+                node["class_type"] == "TextEncodeQwenImage21"
+                and inputs.get("images.image_1") == [m.image, 0]
+                and isinstance(inputs.get("resolution"), (int, float))
+            ):
+                inputs["resolution"] = resolution
+            if (
+                node["class_type"] == "ImageScaleToTotalPixels"
+                and inputs.get("image") == [m.image, 0]
+                and isinstance(inputs.get("megapixels"), (int, float))
+            ):
+                inputs["megapixels"] = float(megapixels)
     if (work_w, work_h) != (width, height):
         for tag, node_id in (("in", m.image), ("mask_in", m.mask)):
             if node_id:

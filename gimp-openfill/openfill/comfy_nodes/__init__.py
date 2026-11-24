@@ -1,4 +1,5 @@
 # OpenFill - generative fill for GIMP 3
+# Modified in the PhotoCraft Workflow Tools fork.
 # Copyright (C) 2026 Beckett Harriman
 # SPDX-License-Identifier: Apache-2.0
 """OpenFill's own ComfyUI nodes. OpenFill copies this folder to
@@ -21,7 +22,41 @@ from __future__ import annotations
 import os
 import time
 
-VERSION = "2"
+VERSION = "3"
+BIG_LAMA_SHA256 = "344c77bbcb158f17dd143070d1e789f38a66c04202311ae3a258ef66667a9ea9"
+
+
+class OpenFillLoadBigLama:
+    """Load exactly the pinned TorchScript checkpoint; no remote or arbitrary .pt loading."""
+
+    CATEGORY = "inpaint"
+    RETURN_TYPES = ("INPAINT_MODEL",)
+    FUNCTION = "load"
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {"model_name": (["big-lama.pt"],)}}
+
+    def load(self, model_name):
+        import hashlib
+        from pathlib import Path
+        from types import SimpleNamespace
+
+        import folder_paths
+        import torch
+
+        path = Path(folder_paths.models_dir) / "inpaint" / "big-lama.pt"
+        if model_name != path.name or not path.is_file() or path.stat().st_size != 205669692:
+            raise ValueError("OpenFill needs the pinned big-lama.pt in ComfyUI/models/inpaint.")
+        digest = hashlib.sha256()
+        with path.open("rb") as stream:
+            for block in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(block)
+        if digest.hexdigest() != BIG_LAMA_SHA256:
+            raise ValueError("OpenFill LaMa weights failed integrity verification.")
+        module = torch.jit.load(str(path), map_location="cpu").eval()
+        return (SimpleNamespace(model=module, architecture=SimpleNamespace(id="LaMa"), to=module.to, cpu=module.cpu),)
+
 
 # Graphics memory per working pixel of big-lama in fp32: about 650 bytes measured on an
 # RTX 2070 Max-Q (peak allocated minus the weights, 1.8 to 4.8 MP passes), with a margin.
@@ -294,5 +329,8 @@ def _box(mask, radius: int):
     return (s2 / (n2.view(1, 1, -1, 1) * n1.view(1, 1, 1, -1))).to(mask.dtype)
 
 
-NODE_CLASS_MAPPINGS = {"OpenFillLamaNative": OpenFillLamaNative}
-NODE_DISPLAY_NAME_MAPPINGS = {"OpenFillLamaNative": "OpenFill LaMa (native resolution)"}
+NODE_CLASS_MAPPINGS = {"OpenFillLamaNative": OpenFillLamaNative, "OpenFillLoadBigLama": OpenFillLoadBigLama}
+NODE_DISPLAY_NAME_MAPPINGS = {
+    "OpenFillLamaNative": "OpenFill LaMa (native resolution)",
+    "OpenFillLoadBigLama": "OpenFill Load verified Big LaMa",
+}

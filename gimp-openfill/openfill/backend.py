@@ -1,4 +1,5 @@
 # OpenFill - generative fill for GIMP 3
+# Modified in the PhotoCraft Workflow Tools fork.
 # Copyright (C) 2026 Beckett Harriman
 # SPDX-License-Identifier: Apache-2.0
 """Backend interface shared by the ComfyUI and AUTOMATIC1111 implementations.
@@ -184,6 +185,7 @@ class InpaintRequest:
     prefill_style: str = "blur"  # "blur": soften existing content (fill); "border": paint the area
     # from its surroundings first (expand, object removal)
     color_match: float = 1.0  # strength of the post color correction (0 = off)
+    megapixels: int | None = None  # lets known custom workflow nodes mirror work_width/height
 
     @property
     def needs_scaling(self) -> bool:

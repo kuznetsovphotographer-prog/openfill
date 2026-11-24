@@ -1,4 +1,5 @@
 # OpenFill for PhotoCraft
+# Modified in the PhotoCraft Workflow Tools fork.
 # SPDX-License-Identifier: Apache-2.0
 """PhotoCraft's side of OpenFill: the functions ``openfill.app.App`` calls on ``App.io``.
 
@@ -53,6 +54,7 @@ from openfill.geometry import Rect, flatten_over_mean
 
 from . import psd
 from .control import ControlClient, ControlError, stop_recording
+from .selection_regions import SelectionRegion, split_selection
 
 # The first PhotoCraft that saves an alpha channel into a flat TIFF (``_selection_tiff``).
 TIFF_CHANNELS_FROM = (0, 18)
@@ -92,6 +94,12 @@ class PCLayer:
         return self.origin.height
 
 
+@dataclass(frozen=True)
+class BrushSelection:
+    rect: Rect
+    grayscale: Image.Image
+
+
 @dataclass(eq=False)
 class PCImage:
     """The PhotoCraft document a job works on, found again by its tab position and name."""
@@ -117,6 +125,8 @@ class PCImage:
     history_after: list[str] | None = None
     revision_after: int | None = None  # the document's revision then (any edit, undo or redo changes it)
     rollback_ok: bool = True  # no step of the user's came between the job's
+    brush_mask: BrushSelection | None = None  # temporary OpenFill-only mask, never a PhotoCraft selection
+    selection_region: SelectionRegion | None = None  # active part of a disconnected document selection
 
     def _inspect(self) -> dict:
         self.bridge.activate(self)
@@ -564,12 +574,36 @@ class PhotoCraftBridge:
         return Rect(0, 0, width, height)
 
     def selection_rect(self, image: PCImage) -> Rect | None:
+        if image.selection_region is not None:
+            return image.selection_region.rect
+        if image.brush_mask is not None:
+            return image.brush_mask.rect
         d = image._inspect()
         bounds = d.get("selectionBounds") if d.get("hasSelection") else None
         if not bounds:
             return None
         x, y, w, h = (int(v) for v in bounds)
         return Rect(x, y, w, h) if w > 0 and h > 0 else None
+
+    def require_selection_revision(self, image: PCImage, revision: int | None = None) -> int:
+        """Never apply a queued area to a changed document or a different active tab."""
+        session = self.session()
+        found = self._find(image, session)
+        current = int(found.get("revision") or 0)
+        if found.get("index") != session.get("active") or (revision is not None and current != revision):
+            raise BridgeError("The active document or selection changed. Restart with a new selection.")
+        return current
+
+    def selection_regions(self, image: PCImage) -> tuple[int, list[SelectionRegion]]:
+        revision = self.require_selection_revision(image)
+        if self.selection_rect(image) is None:
+            return revision, []
+        _, selection = self._snapshot(image)
+        if selection is None:
+            raise BridgeError("PhotoCraft's selection could not be read. Select the areas again.")
+        regions = split_selection(selection)
+        self.require_selection_revision(image, revision)
+        return revision, regions
 
     def _snapshot(self, image: PCImage) -> tuple[Image.Image, Image.Image | None]:
         """The visible image (RGBA) and the selection (L, or None), both canvas-sized, read
@@ -600,7 +634,7 @@ class PhotoCraftBridge:
             self._make_active(copy)
             self._show_like(view)
             visible = self._visible(copy, eight_bit)
-            if d.get("hasSelection"):
+            if d.get("hasSelection") and image.selection_region is None:
                 self._selection_colours = None
                 selection = self._selection_tiff(copy, bounds) if eight_bit else None
                 if selection is not None and not _same_colours(visible, self._selection_colours):
@@ -743,6 +777,10 @@ class PhotoCraftBridge:
         selection is kept for the result's mask, so it is exactly this one even if the user
         changes the selection while the job runs."""
         full, selection = self._snapshot(image)
+        override = image.selection_region or image.brush_mask
+        if override is not None:
+            selection = Image.new("L", full.size)
+            selection.paste(override.grayscale, (override.rect.x, override.rect.y))
         if selection is None:
             selection = Image.new("L", full.size, 255)
         image.selection = selection.tobytes()
@@ -793,6 +831,13 @@ class PhotoCraftBridge:
         Several variations go into a group; only the first is visible. They reach the document
         at the end of the job (``commit``)."""
         self.commit(image, canvas=False)  # an earlier round's results come first; the canvas waits
+        if image.selection_region is not None:
+            # Context may extend past the region, but each committed layer is clipped
+            # to its own original selection, including any holes and soft edges.
+            if scale_to_origin:
+                mask_pixels = image.selection_region.grayscale.tobytes()
+            use_selection_mask = True
+            feather = grow = 0
         layers: list[PCLayer] = []
         for index, data in enumerate(images):
             name = base_name if len(images) == 1 else f"{base_name} ({index + 1})"

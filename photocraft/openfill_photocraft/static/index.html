@@ -1,4 +1,5 @@
 <!doctype html>
+<!-- Modified in the PhotoCraft Workflow Tools fork. -->
 <!-- OpenFill for PhotoCraft. SPDX-License-Identifier: Apache-2.0 -->
 <html lang="en">
 <head>
@@ -253,7 +254,7 @@ const GO={fill:"Generate",remove:"Remove",expand:"Expand",txt2img:"Create",bgrem
 const WHOLE=["bgremove","upscale"];
 const PH={fill:"Describe what to add, or leave it empty to fill from the surroundings.",expand:"Optional: describe what the new area shows.",txt2img:"Describe the image you want."};
 const NO_SEL="Select an area first: Marquee, Lasso or Object Selection.";
-let cloud=null, loaded={}, cloudMeta={}, mode="fill", doc=null, sel=null, models=[], activeId="", lastSeq=-1, busy=false, lastPick=-1, note=null, gear=false, section="models", pc={}, comfy=true, jobState="idle", variations=1, target="image", size=[1024,1024], removal="", thumbsFor="", hiddenIds=[], showHidden=false, factor=2, customName="";
+let cloud=null, loaded={}, cloudMeta={}, mode="fill", doc=null, sel=null, models=[], activeId="", lastSeq=-1, busy=false, lastPick=-1, note=null, gear=false, section="models", pc={}, comfy=true, jobState="idle", variations=1, target="image", size=[1024,1024], removal="", thumbsFor="", hiddenIds=[], showHidden=false, factor=2, customWorkflows=[], customRemoveWorkflows=[];
 
 function segPick(box,btn){box.querySelectorAll("button").forEach(b=>b.classList.toggle("on",b===btn))}
 $("modes").onclick=e=>{const b=e.target.closest("button");if(b)setMode(b.dataset.mode)};
@@ -275,12 +276,13 @@ function showSection(s){section=s;segPick($("sections"),$("sections").querySelec
 
 $("prompt").onkeydown=e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();$("go").click()}};
 $("strength").oninput=()=>$("str-v").textContent=(+$("strength").value).toFixed(2);
-// the custom workflow (Advanced) makes one result per run: no Variations for it
-function syncVars(){const custom=mode==="fill"&&$("model").value==="custom-workflow";$("vars-row").hidden=WHOLE.includes(mode)||custom;$("custom-one").hidden=!custom}
+// Custom workflows make one result per run: no Variations for them.
+function isCustomWorkflow(id){return id==="custom-workflow"||id.startsWith("custom-workflow:")}
+function syncVars(){const custom=(mode==="fill"||mode==="remove")&&isCustomWorkflow($("model").value);$("vars-row").hidden=WHOLE.includes(mode)||custom;$("custom-one").hidden=!custom}
 $("model").onchange=async()=>{const v=$("model").value;syncVars();
   if(v==="__manage"){fillSelect();showGear("models");return}
   if(mode==="remove"){removal=v;return}
-  if(WHOLE.includes(mode)||v==="custom-workflow")return;
+  if(WHOLE.includes(mode)||isCustomWorkflow(v))return;
   if(v&&v!==activeId&&!removers().has(v)){try{await post("/api/models/activate",{id:v});activeId=v}catch(e){say(e.message,"bad")}}};
 function seedOf(){const v=$("seed").value.trim();return v===""?-1:parseInt(v)}
 function say(t,kind){note=t?{text:t,kind:kind||"bad",base:baseContext()[0]}:null;context()}
@@ -288,7 +290,7 @@ async function start(kind,body){try{await post("/api/"+kind,body);lastSeq=-1;say
 $("go").onclick=()=>{if(busy)return;const prompt=$("prompt").value.trim(),model=$("model").value||"active";
   if(mode==="fill"||mode==="remove"){if(!sel){say(NO_SEL,"bad");return}
     const b={prompt:mode==="remove"?"":prompt,negative:mode==="fill"?$("neg").value:"",variations,strength:mode==="fill"?+$("strength").value:1,seed:mode==="fill"?seedOf():-1,remove:mode==="remove"};
-    if(mode==="remove"){b.removal=model;b.model="active";if(["default",...PROMPT_FREE].includes(model))b.variations=1}else{b.model=model;if(model==="custom-workflow")b.variations=1}
+    if(mode==="remove"){b.removal=model;b.model="active";if(["default",...PROMPT_FREE].includes(model)||isCustomWorkflow(model))b.variations=1}else{b.model=model;if(isCustomWorkflow(model))b.variations=1}
     start("fill",b)}
   else if(mode==="bgremove"){if(!doc){say("Open an image in PhotoCraft first.","bad");return}start("bgremove",{})}
   else if(mode==="upscale"){if(!doc){say("Open an image in PhotoCraft first.","bad");return}start("upscale",{factor,upscale_model:model==="active"?"default":model})}
@@ -326,6 +328,7 @@ function removalChoices(){const inst=usable(),rem=inst.filter(r=>(r.capabilities
   const def=PROMPT_FREE.find(m=>ids.has(m)),out=[];
   if(def)out.push([`${short(rem.find(r=>r.id===def).name)} (default)`,"default"]);
   rem.concat(painters).forEach(r=>{if(r.id!==def)out.push([short(r.name),r.id])});
+  customRemoveWorkflows.forEach(([id,label])=>out.push([label,id]));
   return out}
 // A long model list (issue #14): a search field, the user's own model files in their own group,
 // and models hidden from the menu (Show hidden lists them again). The model in use is always listed.
@@ -337,8 +340,9 @@ function fillSelect(){const s=$("model");let opts;
   else{const inst=usable();opts=inst.filter(r=>(r.capabilities||[]).includes(mode)).map(r=>[r.name,r.id]);
     // Fill also offers the removal models: with an empty prompt they remove (LaMa and MAT ignore a prompt, erasers use their own)
     if(mode==="fill")inst.filter(r=>(r.capabilities||[]).includes("remove")&&!(r.capabilities||[]).includes("fill")).forEach(r=>opts.push([r.name,r.id]));
-    if(mode==="fill"&&customName)opts.push([customName,"custom-workflow"])}
-  const want=mode==="remove"?(opts.some(o=>o[1]===removal)?removal:(opts[0]||[])[1]):(opts.some(o=>o[1]===activeId)?activeId:(opts[0]||[])[1]);
+    if(mode==="fill")customWorkflows.forEach(([id,label])=>opts.push([label,id]))}
+  const keepCustom=mode==="fill"&&isCustomWorkflow(s.value)&&opts.some(o=>o[1]===s.value);
+  const want=keepCustom?s.value:mode==="remove"?(opts.some(o=>o[1]===removal)?removal:(opts[0]||[])[1]):(opts.some(o=>o[1]===activeId)?activeId:(opts[0]||[])[1]);
   const q=$("model-search").value.trim(),hidden=new Set(hiddenIds),nHidden=opts.filter(o=>hidden.has(o[1])&&o[1]!==want).length;
   $("model-tools").hidden=opts.length<SEARCH_AT&&!nHidden;$("show-hidden-box").hidden=!nHidden&&!showHidden;$("show-hidden-text").textContent=`Show hidden (${nHidden})`;
   const shown=opts.filter(o=>o[1]===want||((showHidden||!hidden.has(o[1]))&&(!q||matches(o[0],q))));
@@ -409,7 +413,7 @@ function detail(r){const words={fill:"fill",expand:"expand",txt2img:"create",rem
   if(!caps.length||r.runnable===false)what=r.neededBy||"Needed by other models";return[what,r.size].filter(Boolean).join(" · ")}
 function mnote(t,kind){const n=$("mnote");n.hidden=!t;n.textContent=t||"";n.className="note "+(kind||"bad")}
 async function act(fn){try{await fn();mnote("")}catch(e){mnote(e.message,"bad")}loadModels()}
-async function loadModels(){let m;try{m=await get("/api/models")}catch(e){return}models=m.rows||[];hiddenIds=m.hidden||[];customName=m.custom||"";$("hw").textContent=m.hardware||m.error||"";
+async function loadModels(){let m;try{m=await get("/api/models")}catch(e){return}models=m.rows||[];hiddenIds=m.hidden||[];customWorkflows=m.customWorkflows||(m.custom?[["custom-workflow",m.custom]]:[]);customRemoveWorkflows=m.customRemoveWorkflows||[];$("hw").textContent=m.hardware||m.error||"";
   fillSelect();if(!gear||section!=="models")return;
   const inst=models.filter(r=>r.installed).sort((a,b)=>(!a.runnable)-(!b.runnable)||(!a.active)-(!b.active)||a.name.localeCompare(b.name));
   const avail=models.filter(r=>!r.installed&&r.runnable).sort((a,b)=>a.name.localeCompare(b.name));

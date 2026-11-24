@@ -1,4 +1,5 @@
 # OpenFill - generative fill for GIMP 3
+# Modified in the PhotoCraft Workflow Tools fork.
 # Copyright (C) 2026 Beckett Harriman
 # SPDX-License-Identifier: Apache-2.0
 """Orchestration: image in, backend request out, layers back in.
@@ -28,6 +29,7 @@ from . import (
     geometry,
     hardware,
     local_models,
+    named_fill,
     png,
     quality,
     shared_models,
@@ -81,7 +83,7 @@ UPSCALE_MAX_PIXELS = 100_000_000
 # SeedVR2 restores every output pixel with a diffusion model: far slower and hungrier than
 # Real-ESRGAN, so its result is kept smaller.
 SEEDVR2_MAX_PIXELS = 16_800_000
-CUSTOM_WORKFLOW_ID = "custom-workflow"  # the model choice that runs the custom ComfyUI workflow (Advanced)
+CUSTOM_WORKFLOW_ID = named_fill.CUSTOM_WORKFLOW_ID  # the original single workflow in Advanced
 
 # Model ids the old "fast"/"quality" choices meant without a catalog; with
 # one they resolve to the tier's installed default (catalog.TIER_PREFERENCE).
@@ -92,6 +94,7 @@ MODEL_LIST_NODES = (
     ("UNETLoader", "unet_name"),
     ("UnetLoaderGGUF", "unet_name"),
     ("INPAINT_LoadInpaintModel", "model_name"),
+    (workflow.DIRECT_LAMA_LOADER, "model_name"),
 )
 
 
@@ -534,14 +537,16 @@ class App:
 
     # models --------------------------------------------------------------
 
-    def resolve_model(self, choice: str | None) -> tuple[cat.ModelEntry | None, ModelSpec]:
+    def resolve_model(
+        self, choice: str | None, *, fetch_preview: bool = True
+    ) -> tuple[cat.ModelEntry | None, ModelSpec]:
         """Map a dialog choice ('active', a legacy tier or a catalog id) to a model.
         With the cloud backend every choice means the cloud model (no catalog entry)."""
         if self.uses_cloud:
             return None, self.cloud_model_spec()
         choice = (choice or "active").strip()
-        if choice == CUSTOM_WORKFLOW_ID:
-            return None, self.custom_workflow_spec()
+        if named_fill.is_custom_workflow(choice):
+            return None, self.custom_workflow_spec(choice)
         self.require_backend_install()
         self._restart_for_shared_models()
         if choice == "active":
@@ -587,32 +592,42 @@ class App:
                 f"'{model_display_name(entry.name)}' needs the custom node pack(s) {', '.join(status.missing_nodes)}; "
                 "press Install nodes in the Models tab."
             )
-        self._fetch_missing_previews(entry)
+        # A user-provided model doesn't require a downloaded live-preview decoder.
+        if fetch_preview and entry.source != local_models.SOURCE and entry.id != "rorem-sdxl":
+            self._fetch_missing_previews(entry)
         return entry, cat.model_spec_for(entry, self.catalog, self.models_root)
 
-    def custom_workflow_spec(self) -> ModelSpec:
+    def custom_workflow_spec(self, choice: str = CUSTOM_WORKFLOW_ID) -> ModelSpec:
         """The custom ComfyUI workflow (Advanced) as a model: read and checked again for every
         job, so an edited file is used as it is now. ComfyUI on this computer only: the Remote
         GPU's server runs only OpenFill's own graphs, and other backends cannot run ComfyUI graphs."""
-        path = (self.settings.custom_workflow or "").strip()
-        if not path:
-            raise CustomWorkflowProblem(
-                "No custom workflow is set. Choose a ComfyUI workflow file (API format) under Advanced in the settings."
-            )
         if self.settings.uses_remote or self.settings.backend != "comfyui":
             raise CustomWorkflowProblem(
                 "A custom workflow runs on ComfyUI on this computer only. Switch the backend to Local, "
                 "or pick another model."
             )
+        if choice == CUSTOM_WORKFLOW_ID:
+            path = (self.settings.custom_workflow or "").strip()
+            inputs = self.settings.custom_workflow_inputs
+            label = self.custom_workflow_name()
+            if not path:
+                raise CustomWorkflowProblem(
+                    "No custom workflow is set. Choose a ComfyUI workflow file (API format) under Advanced in the settings."
+                )
+        else:
+            item = named_fill.load(self.paths.base).get(choice)
+            if item is None:
+                raise CustomWorkflowProblem(
+                    "This local Fill workflow is missing. Pick another model or restore its JSON file."
+                )
+            path, inputs, label = str(item.path), item.inputs, item.label
         self.require_backend_install()
         try:
-            wf = custom_workflow.load(path, self.settings.custom_workflow_inputs)
+            wf = custom_workflow.load(path, inputs)
         except custom_workflow.CustomWorkflowError as err:
             raise CustomWorkflowProblem(f"The custom workflow can't be used: {err}") from None
         self.log.info("custom workflow %s: %s", wf.source, wf.describe())
-        return ModelSpec(
-            checkpoint=f"Custom workflow ({wf.name})", arch="custom", template="custom_workflow", custom=wf
-        )
+        return ModelSpec(checkpoint=label, arch="custom", template="custom_workflow", custom=wf)
 
     def custom_workflow_name(self) -> str:
         """The custom workflow's menu name ("" when none is set)."""
@@ -621,6 +636,27 @@ class App:
             return ""
         stem = Path(path.strip('"')).stem or "workflow"
         return f"Custom workflow ({stem})"
+
+    def custom_workflow_choices(self, operation: str = "fill") -> list[tuple[str, str]]:
+        """Local Fill workflows, or the named workflows that opt in to Remove."""
+        if self.settings.backend != "comfyui" or self.settings.uses_remote:
+            return []
+        named = named_fill.load(self.paths.base)
+        if operation == "remove":
+            return [(key, item.label) for key, item in named.items() if item.remove_prompt]
+        if operation != "fill":
+            return []
+        choices = [(key, item.label) for key, item in named.items()]
+        old_label = self.custom_workflow_name()
+        if old_label:
+            try:
+                old_path = Path(self.settings.custom_workflow.strip().strip('"')).resolve()
+                duplicate = any(item.path == old_path for item in named.values())
+            except (OSError, ValueError, RuntimeError):
+                duplicate = False
+            if not duplicate:
+                choices.append((CUSTOM_WORKFLOW_ID, old_label))
+        return choices
 
     def cloud_model_spec(self) -> ModelSpec:
         from .backends.cloud import provider
@@ -695,7 +731,7 @@ class App:
         except (OSError, ValueError) as err:
             self.log.warning("could not queue the live-preview file: %s", err)
 
-    def profile_for(self, model: ModelSpec) -> geometry.ModelProfile:
+    def profile_for(self, model: ModelSpec, megapixels: int | None = None) -> geometry.ModelProfile:
         base = geometry.PROFILES.get(model.arch, geometry.SD15)
         if model.arch == "sd15":
             max_side = self.settings.max_side_sd15
@@ -703,7 +739,8 @@ class App:
             max_side = base.max_side
         else:
             max_side = self.settings.max_side_sdxl
-        return replace(base, max_side=max(base.min_side, int(max_side)))
+        profile = replace(base, max_side=max(base.min_side, int(max_side)))
+        return profile if model.prompt_free or self.uses_cloud else geometry.with_megapixels(profile, megapixels)
 
     def sampling(self, model: ModelSpec, variations: int, seed: int, denoise: float | None = None) -> Sampling:
         steps, cfg = int(self.settings.steps), float(self.settings.cfg)
@@ -1113,6 +1150,7 @@ class App:
         model_choice: str,
         remove: bool = False,
         as_picked: bool = False,
+        megapixels: int | None = None,
     ) -> list:
         # ``as_picked``: ``model_choice`` was picked by hand for this job (a Remove menu), so it
         # is used even when it is also the active model.
@@ -1124,8 +1162,13 @@ class App:
         if selection is None:
             self.log.info("fill: refused, nothing selected")
             raise NothingSelected(NO_SELECTION_MESSAGE)
+        named_removal = None
         if self.uses_cloud:
             pass  # one model does everything; LaMa and the catalog are not involved
+        elif remove and named_fill.is_custom_workflow(model_choice):
+            named_removal = named_fill.load(self.paths.base).get(model_choice)
+            if named_removal is None or not named_removal.remove_prompt:
+                raise CustomWorkflowProblem("That custom workflow isn't configured for Remove. Choose a Remove model.")
         elif (remove or not prompt.strip()) and not as_picked and self._is_default_choice(model_choice):
             # Remove object, or an empty prompt, with the default model: LaMa (then MAT)
             # whenever one is installed; generation checkpoints (SDXL in 10 of 13 judged
@@ -1142,7 +1185,7 @@ class App:
                     model_choice,
                 )
         entry, model = self.resolve_model(model_choice)
-        profile = self.profile_for(model)
+        profile = self.profile_for(model, megapixels)
         full = self.io.image_rect(image)
         target = selection
         removal_intent = remove or not prompt.strip() or model.prompt_free or model.eraser
@@ -1194,6 +1237,8 @@ class App:
             # Erase-trained: their own prompt (what the user typed is not used).
             prompt, negative = workflow.ERASER_PROMPTS.get(model.effective_template, ("", ""))
             strength = 1.0
+        elif named_removal is not None:
+            prompt, negative, strength = named_removal.remove_prompt, "", 1.0
         elif removal_intent:
             # Empty prompt on a generation model: ask for background, not "anything".
             prompt = self.REMOVAL_PROMPT
@@ -1238,7 +1283,12 @@ class App:
         if model.effective_template == "custom_workflow":
             # The selection travels in the picture's alpha too (ComfyUI's convention for a painted
             # mask), and the mask file carries it as gray and as alpha, for any mask loader.
-            image_png = png.encode(ctx.width, ctx.height, custom_workflow.rgba_with_mask(image_rgba, mask_raw), 4)
+            ref = image_rgba
+            if named_removal is not None and named_removal.mark_selection:
+                # Qwen's vision input reads RGB, not LoadImage's MASK output. Its removal
+                # reference marks the target explicitly; compositing still uses the original mask.
+                ref = named_fill.mark_removal_reference(ref, mask_raw)
+            image_png = png.encode(ctx.width, ctx.height, custom_workflow.rgba_with_mask(ref, mask_raw), 4)
             mask_png = png.encode(ctx.width, ctx.height, custom_workflow.mask_rgba(mask_raw), 4)
         if self.settings.scene_caption and not removal_intent and not model.prompt_free:
             sw, sh, small = caption.sample(ctx.width, ctx.height, image_rgba, 4)
@@ -1259,6 +1309,7 @@ class App:
             model=model,
             sampling=self.sampling(model, variations, seed, strength),
             mode="remove" if self.uses_cloud and removal_intent else "fill",
+            megapixels=profile.megapixels,
             grow=mp.grow_work,
             feather=mp.blur_work,
             prefill=self.settings.prefill,
@@ -1429,6 +1480,7 @@ class App:
         variations: int,
         seed: int,
         model_choice: str,
+        megapixels: int | None = None,
     ) -> list:
         """Crop and/or grow the canvas by the given margins and generate the new area.
 
@@ -1478,7 +1530,18 @@ class App:
                 count = variations if index == len(rounds) - 1 else 1
                 this_crop = crop if index == 0 else (0, 0, 0, 0)
                 layers = self._expand_round(
-                    image, prompt, negative, round_margins, this_crop, count, seed, entry, model, runner, tracker
+                    image,
+                    prompt,
+                    negative,
+                    round_margins,
+                    this_crop,
+                    count,
+                    seed,
+                    entry,
+                    model,
+                    runner,
+                    tracker,
+                    megapixels=megapixels,
                 )
             runner.done(f"Canvas is now {image.get_width()} x {image.get_height()}")
         except BaseException as err:
@@ -1501,12 +1564,13 @@ class App:
         model: ModelSpec,
         runner: Any,
         tracker: OverallProgress,
+        megapixels: int | None = None,
     ) -> list:
         """One expand pass: all margins at once. ``crop`` (left, top, right,
         bottom) is cut off in the same canvas resize and is not part of the context."""
         left, top, right, bottom = margins
         old_width, old_height = image.get_width(), image.get_height()
-        profile = self.profile_for(model)
+        profile = self.profile_for(model, megapixels)
         plan = geometry.plan_expand(
             image.get_width() - crop[0] - crop[2],
             image.get_height() - crop[1] - crop[3],
@@ -1573,6 +1637,7 @@ class App:
             model=model,
             sampling=sampling,
             mode="expand",
+            megapixels=profile.megapixels,
             grow=mp.grow_work,
             feather=mp.blur_work,
             prefill=True,
@@ -1634,6 +1699,7 @@ class App:
         seed: int,
         model_choice: str,
         target: str,
+        megapixels: int | None = None,
     ) -> None:
         if image is not None and target == "layer":
             self._check_image(image)
@@ -1642,7 +1708,7 @@ class App:
             raise ModelMissing(
                 f"'{model_display_name(entry.name)}' does not support Text to Image; pick an SD 1.5 or SDXL model"
             )
-        profile = self.profile_for(model)
+        profile = self.profile_for(model, megapixels)
         origin = Rect(0, 0, 0, 0)
         if image is not None and target == "layer":
             selection = self.io.selection_rect(image)

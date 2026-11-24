@@ -1,6 +1,7 @@
 {
   "version": 1,
   "notes": [
+    "PhotoCraft Workflow Tools fork: the verified Big LaMa loader is bundled with OpenFill nodes v3.",
     "Every URL points at an official project page: Hugging Face repositories of the model authors (or Comfy-Org / comfyanonymous repackaging), or GitHub releases.",
     "source_type is 'first-party' when the uploader is the model author or the ComfyUI project, 'community-quantization' when a third party converted the weights (uploader named in 'uploader').",
     "Hugging Face URLs name a commit (resolve/<40-hex commit>/), never a branch: an uploader can replace a file on main, and then its sha256 no longer matches (issue #13).",
@@ -337,7 +338,7 @@
       "min_vram_gb": 2,
       "requires_nodes": [
         {"repo": "https://github.com/Acly/comfyui-inpaint-nodes", "folder": "comfyui-inpaint-nodes", "commit": "5b7681746fe19e563113d27366ba85236bc1ba5b", "license": "GPL-3.0"},
-        {"repo": "bundled", "folder": "openfill-nodes", "commit": "2", "license": "same as OpenFill (ships with it)"}
+        {"repo": "bundled", "folder": "openfill-nodes", "commit": "3", "license": "same as OpenFill (ships with it)"}
       ],
       "requires_models": [],
       "files": [

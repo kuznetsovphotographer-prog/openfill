@@ -1,4 +1,5 @@
 # OpenFill - generative fill for GIMP 3
+# Modified in the PhotoCraft Workflow Tools fork.
 # Copyright (C) 2026 Beckett Harriman
 # SPDX-License-Identifier: Apache-2.0
 """urllib-only client for the ComfyUI HTTP and WebSocket API."""
@@ -318,6 +319,10 @@ class ComfyClient:
     def queue(self) -> dict:
         """GET /queue (running and pending prompts)."""
         return self._json("GET", "/queue")
+
+    def release_memory(self) -> None:
+        """Ask ComfyUI to unload the models and clear its cache while idle."""
+        self._json("POST", "/free", {"unload_models": True, "free_memory": True})
 
     def interrupt(self) -> None:
         """POST /interrupt: stop the prompt that is running now."""

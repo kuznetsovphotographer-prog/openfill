@@ -1,4 +1,5 @@
 # OpenFill for PhotoCraft
+# Modified in the PhotoCraft Workflow Tools fork.
 # SPDX-License-Identifier: Apache-2.0
 """The companion's engine: one OpenFill job at a time against the active PhotoCraft document.
 
@@ -20,11 +21,13 @@ from typing import Any
 from openfill.app import App, NothingSelected
 from openfill.backend import BackendUnavailable, GenerationCancelled, describe_error
 from openfill.backends.comfy import CONNECTION_LOST
+from openfill.geometry import generation_megapixels
 from openfill.progress import parse_preview_frame
 from openfill.supervisor import process_name
 
-from .bridge import PCImage, PCLayer, PhotoCraftBridge
+from .bridge import BrushSelection, PCImage, PCLayer, PhotoCraftBridge
 from .control import ControlClient, ControlError
+from .localization import tr
 
 NO_SELECTION = "Select an area first: Marquee, Lasso or Object Selection. Select > All works on the whole image."
 
@@ -89,6 +92,9 @@ class JobState:
     variations: list[str] = field(default_factory=list)  # names, best first
     shown: int = 0
     notices: list[str] = field(default_factory=list)
+    area_index: int = 0
+    area_total: int = 0
+    areas_committed: int = 0
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def snapshot(self) -> dict[str, Any]:
@@ -124,7 +130,13 @@ class WebRunner:
 
     def _progress(self, fraction: float, text: str) -> None:
         with self.state.lock:
-            self.state.fraction, self.state.text = max(0.0, min(1.0, float(fraction))), str(text)
+            fraction = max(0.0, min(1.0, float(fraction)))
+            if self.state.area_total:
+                prefix = f"Area {self.state.area_index}/{self.state.area_total}"
+                self.state.fraction = (self.state.area_index - 1 + fraction) / self.state.area_total
+                self.state.text = f"{prefix}: {text}" if text else prefix
+            else:
+                self.state.fraction, self.state.text = fraction, str(text)
 
     def _preview(self, payload: bytes) -> None:
         frame = parse_preview_frame(payload)
@@ -348,23 +360,55 @@ class Service:
     def busy(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
 
+    def brush_models(self) -> dict[str, str]:
+        """IDs of the three installed local erasers; never substitute or download."""
+        if self.app.settings.backend != "comfyui" or self.app.settings.uses_remote:
+            return {}
+        rows = self.app.installed_models("remove")
+        ids = {row.id for row in rows}
+        models = {mode: key for mode, key in (("fast", "lama-big"), ("medium", "rorem-sdxl")) if key in ids}
+        flux = next((row.id for row in rows if row.name.startswith("flux1-fill-dev-fp8 ")), "")
+        if flux:
+            models["hard"] = flux
+        return models
+
+    def _verify_target(self, expected: tuple, *, lasso=False) -> None:
+        state = self.client.call("ui.inspect")
+        s = state.get("session") or {}
+        d = state.get("document") or {}
+        active = next((row for row in s.get("documents") or [] if row.get("index") == s.get("active")), {})
+        if (active.get("index"), active.get("name"), active.get("revision")) != tuple(expected[:3]):
+            raise RuntimeError(tr("stale"))
+        if lasso and (
+            str(state.get("tool", "")).casefold() != "lasso"
+            or state.get("dialogs")
+            or tuple(d.get("selectionBounds") or ()) != tuple(expected[3])
+        ):
+            raise RuntimeError(tr("stale_lasso"))
+
     def start(self, kind: str, params: dict[str, Any]) -> None:
+        custom = self._custom_label(params)
         if self.busy():
-            raise RuntimeError("A job is already running.")
+            raise RuntimeError(
+                tr("busy") if custom or kind in ("preload", "vram-free") else "A job is already running."
+            )
         with self.state.lock:
             self.state.state, self.state.kind, self.state.message, self.state.text = "running", kind, "", "Starting..."
             self.state.title = {
-                "fill": "Object Removal" if params.get("remove") else "Generative Fill",
+                "fill": tr(custom) if custom else "Object Removal" if params.get("remove") else "Generative Fill",
                 "expand": "Generative Expand",
                 "txt2img": "Text to Image",
                 "bgremove": "Remove Background",
                 "upscale": "Upscale",
+                "vram-free": tr("unload"),
+                "preload": tr("preload"),
             }.get(kind, kind)
-            self.state.model = ""
+            self.state.model = str(params.get("model_label") or "") if kind == "preload" else ""
             self.state.fraction, self.state.started, self.state.finished = 0.0, time.time(), 0.0
             self.state.cancel_requested, self.state.variations, self.state.shown = False, [], 0
             self.state.preview, self.state.preview_seq = b"", self.state.preview_seq + 1
             self.state.preview_rect = None
+            self.state.area_index = self.state.area_total = self.state.areas_committed = 0
         self._thread = threading.Thread(target=self._job, args=(kind, params), name="openfill-job", daemon=True)
         self._thread.start()
 
@@ -387,38 +431,65 @@ class Service:
     def _job(self, kind: str, p: dict[str, Any]) -> None:
         image = None
         engine_before = self.engine
-        if self.engine == ENGINE_STOPPED:
+        if self.engine == ENGINE_STOPPED and kind != "vram-free":
             self.engine = "starting"  # the job starts ComfyUI again
         if self._warm is not None and self._warm.is_alive():
             with self.state.lock:
                 self.state.text = "Starting the AI engine (the first time takes about a minute)..."
             self._warm.join()  # one start of ComfyUI, not two
         try:
+            if kind in ("preload", "vram-free"):
+                from . import vram
+
+                def progress(fraction, message=""):
+                    with self.state.lock:
+                        self.state.fraction, self.state.text = fraction, message
+
+                text = (
+                    vram.preload(
+                        self.app,
+                        str(p.get("model") or ""),
+                        progress,
+                        lambda: self.state.cancel_requested,
+                        operation=str(p.get("operation") or "fill"),
+                    )
+                    if kind == "preload"
+                    else vram.unload(self.app)
+                )
+                if kind == "preload":
+                    self._engine_ready()
+                with self.state.lock:
+                    self.state.state, self.state.fraction = "done", 1.0
+                    self.state.text = self.state.message = text
+                return
+            if p.get("expected_target"):
+                self._verify_target(tuple(p["expected_target"]), lasso=p.get("auto_lasso") is True)
             image = self.bridge.active_image() if kind != "txt2img" or p.get("target") == "layer" else None
             if kind != "txt2img" and image is None:
                 raise RuntimeError(f"Open an image in {self.host} first.")
             self._job_base, self._expected_history, self._collapsed = [], [], False
             base: list[str] | None = None
             if image is not None:
+                if isinstance(p.get("brush_mask"), BrushSelection):
+                    image.brush_mask = p["brush_mask"]
                 self.bridge.track(image)
                 base = self.bridge.history(image)
             self.image = image
             seed = int(p.get("seed", -1))
             variations = int(p.get("variations", 1))
             model = str(p.get("model") or "active")
-            if kind == "fill" and p.get("remove"):
-                layers = self._remove(image, p, seed, variations)
-            elif kind == "fill":
-                layers = self.app.generative_fill(
-                    image,
-                    str(p.get("prompt", "")),
-                    str(p.get("negative", "")),
-                    variations,
-                    float(p.get("strength", 1.0)),
-                    seed,
-                    model,
-                    remove=bool(p.get("remove")),
-                )
+            consumes_selection = kind == "fill" or (
+                kind == "txt2img"
+                and p.get("target") == "layer"
+                and (int(p.get("width", 0)) <= 0 or int(p.get("height", 0)) <= 0)
+            )
+            if consumes_selection and isinstance(image, PCImage) and image.brush_mask is None:
+                revision, areas = self.bridge.selection_regions(image)
+                if areas:
+                    self._run_selection_regions(image, revision, areas, kind, p, seed, model)
+                    return
+            if kind in ("fill", "txt2img"):
+                layers = self._render_selection_job(image, kind, p, seed, model, variations)
             elif kind == "expand":
                 layers = self.app.generative_expand(
                     image,
@@ -431,6 +502,7 @@ class Service:
                     variations,
                     seed,
                     model,
+                    megapixels=generation_megapixels(p.get("megapixels")),
                 )
             elif kind == "bgremove":
                 layers = self.app.remove_background(image)
@@ -439,22 +511,9 @@ class Service:
                 # (and finishing it would bring it back to the front over the new one).
                 self.app.upscale(image, int(p.get("factor", 2)), str(p.get("upscale_model") or "default"))
                 layers, image, self.image = [], None, None
-            elif kind == "txt2img":
-                self.app.text_to_image(
-                    image,
-                    str(p.get("prompt", "")),
-                    str(p.get("negative", "")),
-                    int(p.get("width", 0)),
-                    int(p.get("height", 0)),
-                    variations,
-                    seed,
-                    model,
-                    str(p.get("target", "image")),
-                )
-                layers = []
             else:
                 raise RuntimeError(f"unknown job {kind}")
-            done_text = self.state.text or "Done"
+            done_text = tr("done") if self._custom_label(p) else self.state.text or "Done"
             if image is not None:
                 with self.state.lock:
                     self.state.text = f"Adding the result to {self.host}..."
@@ -480,18 +539,95 @@ class Service:
                 self.engine = engine_before  # check_engine sees a ComfyUI that did come up
             with self.state.lock:
                 self.state.state = "cancelled" if cancelled else "error"
+                completed = self.state.areas_committed
                 if cancelled:
-                    self.state.message = "Cancelled - the image was left unchanged."
+                    self.state.message = "Cancelled." if completed else "Cancelled - the image was left unchanged."
                 elif isinstance(err, NothingSelected):  # the core's message names GIMP's tools
                     self.state.message = NO_SELECTION
                 else:
                     self.state.message = describe(err)
+                if completed:
+                    self.state.message += f" Kept {completed} of {self.state.area_total} completed area(s)."
         finally:
             if image is not None:
                 # whatever did not reach the document is dropped
                 self._say_what_is_left(self.bridge.discard(image))
             with self.state.lock:
                 self.state.finished = time.time()
+
+    def _render_selection_job(self, image, kind, p, seed, model, variations):
+        if kind == "txt2img":
+            self.app.text_to_image(
+                image,
+                str(p.get("prompt", "")),
+                str(p.get("negative", "")),
+                int(p.get("width", 0)),
+                int(p.get("height", 0)),
+                variations,
+                seed,
+                model,
+                str(p.get("target", "image")),
+                megapixels=generation_megapixels(p.get("megapixels")),
+            )
+            return []
+        if p.get("remove"):
+            return self._remove(image, p, seed, variations)
+        # Fill always honors the model dropdown, including with an empty prompt.
+        return self.app.generative_fill(
+            image,
+            str(p.get("prompt", "")),
+            str(p.get("negative", "")),
+            variations,
+            float(p.get("strength", 1.0)),
+            seed,
+            model,
+            as_picked=True,
+            megapixels=generation_megapixels(p.get("megapixels")),
+        )
+
+    def _run_selection_regions(self, image, revision, areas, kind, p, seed, model) -> None:
+        count = len(areas)
+        self.layers = []
+        try:
+            for i, area in enumerate(areas, 1):
+                if self.state.cancel_requested:
+                    raise GenerationCancelled("cancelled between areas")
+                self.bridge.require_selection_revision(image, revision)
+                image.selection_region = area
+                with self.state.lock:
+                    self.state.area_index, self.state.area_total = i, count
+                    self.state.fraction = (i - 1) / count
+                    self.state.text = f"Area {i}/{count}: preparing selection…"
+                    self.state.preview, self.state.preview_rect = b"", None
+                    self.state.preview_seq += 1
+                area_seed = (seed + i - 1) % 2**64 if seed >= 0 else -1
+                self._render_selection_job(image, kind, p, area_seed, model, variations=1)
+                if self.state.cancel_requested:
+                    raise GenerationCancelled("cancelled before adding the area")
+                self.bridge.require_selection_revision(image, revision)
+                if len(image.pending) != 1:
+                    raise RuntimeError("The model did not return one result for this area.")
+                image.pending[0].name += f" — Area {i}"
+                with self.state.lock:
+                    self.state.text = f"Area {i}/{count}: adding layer…"
+                self.bridge.commit(image)
+                revision = image.revision_after
+                # This area is delivered. Only unfinished work can be discarded;
+                # the next area is evaluated against the newly committed document.
+                image.steps_added, image.history_after, image.revision_after = 0, None, None
+                image.rollback_ok = True
+                image.selection = None
+                image.layers.clear()
+                with self.state.lock:
+                    self.state.areas_committed, self.state.fraction = i, i / count
+        finally:
+            image.selection_region = None
+        self._engine_ready()
+        with self.state.lock:
+            self.state.state = "done"
+            self.state.text = self.state.message = f"Added {count} areas on separate layers."
+            self.state.preview, self.state.preview_rect = b"", None
+            self.state.preview_seq += 1
 
     def _say_what_is_left(self, outcome: object) -> None:
         """After a failed or cancelled job: when what an earlier round put in is still in the
@@ -510,6 +646,12 @@ class Service:
     # two-pass "LaMa + a generation model", which LaMa at full resolution replaced.
     OLD_REMOVALS = {"lama": "lama-big", "mat": "mat-places512"}
 
+    @staticmethod
+    def _custom_label(params: dict[str, Any]) -> str | None:
+        if isinstance(params.get("brush_mask"), BrushSelection):
+            return "brush"
+        return "remove_now" if params.get("auto_lasso") else None
+
     def _remove(self, image: PCImage, p: dict[str, Any], seed: int, variations: int) -> list:
         """Remove object with ``removal``: "default" (LaMa at the image's own resolution,
         else MAT, else the active model with a background prompt) or any installed model's
@@ -520,12 +662,23 @@ class Service:
             how = "active"
         how = self.OLD_REMOVALS.get(how, how)
         layers = self.app.generative_fill(
-            image, "", "", variations, 1.0, seed, how, remove=True, as_picked=how != "active"
+            image,
+            "",
+            "",
+            variations,
+            1.0,
+            seed,
+            how,
+            remove=True,
+            as_picked=how != "active",
+            megapixels=generation_megapixels(p.get("megapixels")),
         )
+        custom = self._custom_label(p)
+        layer_name = tr(custom) if custom else "Object Removal"
         for index, layer in enumerate(layers):
-            layer.name = "Object Removal" if len(layers) == 1 else f"Object Removal ({index + 1})"
+            layer.name = layer_name if len(layers) == 1 else f"{layer_name} ({index + 1})"
         if image.pending_group:
-            image.pending_group = "Object Removal"
+            image.pending_group = layer_name
         return layers
 
     # ComfyUI ----------------------------------------------------------------------------

@@ -1,4 +1,5 @@
 # OpenFill - generative fill for GIMP 3
+# Modified in the PhotoCraft Workflow Tools fork.
 # Copyright (C) 2026 Beckett Harriman
 # SPDX-License-Identifier: Apache-2.0
 """ComfyUI backend: builds graphs, uploads inputs, streams progress and previews."""
@@ -139,10 +140,15 @@ class ComfyBackend(Backend):
         if self._caps is None or refresh:
             info = self.client.object_info("INPAINT_ExpandMask")
             native = self.client.object_info(workflow.NATIVE_LAMA_NODE)
+            direct_lama = self.client.object_info(workflow.DIRECT_LAMA_LOADER)
             bg = self.client.object_info("RemoveBackground")
             seedvr2 = self.client.object_info("SeedVR2Conditioning")
             self._caps = workflow.Capabilities(
-                inpaint_nodes=bool(info), native_lama=bool(native), bg_removal=bool(bg), seedvr2=bool(seedvr2)
+                inpaint_nodes=bool(info),
+                native_lama=bool(native),
+                bg_removal=bool(bg),
+                seedvr2=bool(seedvr2),
+                direct_lama=bool(direct_lama),
             )
         return self._caps
 

@@ -1,4 +1,5 @@
 # OpenFill for PhotoCraft
+# Modified in the PhotoCraft Workflow Tools fork.
 # SPDX-License-Identifier: Apache-2.0
 """The companion's page and JSON API on 127.0.0.1 (standard library only).
 
@@ -106,14 +107,16 @@ class Api:
                 cat.add_amd_notes(rows, app.catalog)  # what may not work on an AMD card
         except Exception:  # noqa: BLE001
             hw = None
-        custom = app.custom_workflow_name() if app.settings.backend == "comfyui" else ""
+        custom = app.custom_workflow_choices()
         return {
             "rows": rows,
             "current": current,
             "pending": pending,
             "hardware": hw,
             "hidden": app.hidden_models(),
-            "custom": custom,
+            "custom": next((label for key, label in custom if key == "custom-workflow"), ""),
+            "customWorkflows": custom,
+            "customRemoveWorkflows": app.custom_workflow_choices("remove"),
         }
 
     def thumbnail(self, index: int) -> bytes:

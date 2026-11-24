@@ -1,4 +1,5 @@
 # OpenFill for PhotoCraft
+# Modified in the PhotoCraft Workflow Tools fork.
 # SPDX-License-Identifier: Apache-2.0
 """The OpenFill panel: a window without a title bar that stays on top of PhotoCraft, like
 Photoshop's contextual task bar. Its header (OpenFill and the engine's status, the gear for
@@ -26,9 +27,12 @@ from typing import Any
 
 from PIL import Image, ImageDraw
 
+from openfill.geometry import generation_megapixels
+from openfill.named_fill import is_custom_workflow
 from openfill.server import SLOW_START_S
 
 from . import dpi, ui
+from .localization import tr
 from .menu import Watcher
 from .modelinfo import choose_card_line, comfy_help_url, download_card_line, hardware_line, needed_by
 from .service import ENGINE_RESTARTING, ENGINE_STOPPED, Service, photocraft_text
@@ -73,7 +77,6 @@ NO_SELECTION = "Select an area first: Marquee, Lasso or Object Selection."
 NO_MODELS = "No models installed"
 NO_BG_MODEL = "Download BiRefNet in Models"
 NO_UPSCALE_MODEL = "Download Real-ESRGAN in Models"
-CUSTOM_WORKFLOW_ID = "custom-workflow"  # openfill.app.CUSTOM_WORKFLOW_ID
 CUSTOM_ONE = "A custom workflow makes one result per run, so Variations is off for it."  # ui_text.CUSTOM_WORKFLOW_ONE
 # The status line once the AI engine has stopped (crashed or was closed) after it was ready.
 STOPPED = "Stopped: Generate restarts it"
@@ -155,7 +158,7 @@ def removal_choices(facts: dict[str, Any]) -> dict[str, str]:
     if default:
         name = next(n for i, n in removers if i == default)
         out[f"{short_name(name)} (default)"] = "default"
-    for model_id, name in removers + painters:
+    for model_id, name in removers + painters + list(facts.get("custom_remove", [])):
         if model_id == default:
             continue
         label = short_name(name)
@@ -170,6 +173,8 @@ def fill_choices(facts: dict[str, Any]) -> dict[str, str]:
     empty prompt they remove; LaMa and MAT ignore a prompt, erasers use their own)."""
     models = facts.get("models") or {}
     out = {name: model_id for model_id, name in models.get("fill", [])}
+    for model_id, name in facts.get("custom_fill", []):
+        out.setdefault(name, model_id)
     for model_id, name in models.get("remove", []):
         if model_id not in out.values():
             out.setdefault(name, model_id)
@@ -296,12 +301,11 @@ class Refresher:
             if row["installed"] and row["runnable"] and not row["missing_models"] and not row["missing_nodes"]:
                 for capability in row["capabilities"]:
                     models.setdefault(capability, []).append((row["id"], row["name"]))
-        custom = app.custom_workflow_name() if app.settings.backend == "comfyui" else ""
-        if custom:  # Advanced: the user's own ComfyUI workflow, one more choice for Fill
-            models.setdefault("fill", []).append((CUSTOM_WORKFLOW_ID, custom))
         active = app.active_model_id()
         facts.update(
             models=models,
+            custom_fill=app.custom_workflow_choices(),
+            custom_remove=app.custom_workflow_choices("remove"),
             active=active,
             active_name=next((r["name"] for r in rows if r["id"] == active), ""),
             downloading="",
@@ -419,6 +423,7 @@ class Bar:
         self.host, self.reopen = host, reopen
         self.settings_file = profile / "bar.json"
         self.prefs = self._load_prefs()
+        self.prefs.pop("feature_language", None)
         self.calls: queue.Queue = queue.Queue()  # actions from other threads
         self.refresher = Refresher(service, profile / "bar-models.json")
         self.wrap = CW
@@ -450,6 +455,7 @@ class Bar:
         self.tether = tether
         self.tab = tk.StringVar(value="fill")
         self.variations = tk.IntVar(value=max(1, min(5, int(self.prefs.get("variations", 1)))))
+        self.resolution_mp = generation_megapixels(self.prefs.get("megapixels")) or 1
         self.model_choice = tk.StringVar(value="")
         self.target = tk.StringVar(value="image")
         self.upscale_factor = tk.IntVar(value=4 if int(self.prefs.get("upscale_factor", 2) or 2) == 4 else 2)
@@ -520,6 +526,13 @@ class Bar:
         # Shown under the context whenever the cloud is the backend: what leaves this computer.
         self.cloud_line = ui.small(m, "", fg=WARN)
         self.remove_line = ui.small(m, "Erases what you selected and fills in the background around it.")
+        self.auto_lasso = ui.Checkbox(m, tr("lasso"))
+        self.auto_lasso.var.trace_add("write", self._arm_auto_lasso)
+        self.brush_tools = ui.frame(m)
+        self.brush_button = ui.Button(self.brush_tools, tr("brush") + "…", self._open_smart_brush, width=ui.px(202))
+        self.brush_button.pack(side="left")
+        self._last_lasso = None
+        self._brush_window = None
         self.custom_line = ui.small(m, CUSTOM_ONE)
         self.bg_line = ui.small(
             m, "Cuts the subject out of the whole image and adds it as a new layer with a transparent background."
@@ -587,6 +600,16 @@ class Bar:
             on_hide=self._model_hidden,
         )
         self.model_box.pack(side="left")
+        self.resolution_controls = self._row(self.options, "Resolution", pady=ui.px((8, 0)))
+        self.resolution_seg = ui.Seg(
+            self.resolution_controls,
+            [(mp, f"{mp} MP") for mp in (1, 2, 3, 4)],
+            self.pick_resolution,
+            ui.FIELD_W,
+            12,
+        )
+        self.resolution_seg.pack(side="left")
+        self.resolution_seg.set(self.resolution_mp)
 
         # The setup card (ComfyUI missing, no models, a download) and the job card
         self.setup = ui.Card(m)
@@ -662,6 +685,14 @@ class Bar:
         self.collapse_button.pack(side="right", padx=ui.px((2, 10)))
         self.gear_button = ui.IconButton(head, "gear", self.toggle_gear)
         self.gear_button.pack(side="right")
+        self.free_button = ui.IconButton(
+            head, "memory-free", lambda: self._header_memory("vram-free"), tooltip=tr("header_free_tip")
+        )
+        self.free_button.pack(side="right")
+        self.preload_button = ui.IconButton(
+            head, "memory-load", lambda: self._header_memory("preload"), tooltip=tr("header_preload_tip")
+        )
+        self.preload_button.pack(side="right")
         self.head_tools = ui.frame(head)
         logo = tk.Label(self.head_tools, image=ui.app_icon(ui.px(18), BG), bg=BG, bd=0, highlightthickness=0)
         logo.pack(side="left")
@@ -1047,6 +1078,10 @@ class Bar:
     def show(self, action: str = "") -> None:
         """Bring the panel up; a menu action also picks its mode (Remove starts at once)."""
         self.expand()
+        if action == "brush":
+            self.select_tab("remove")
+            self._open_smart_brush()
+            return
         if action in dict(TABS):
             self.select_tab(action)
         elif self.view:
@@ -1146,11 +1181,19 @@ class Bar:
             var_row.pack_forget()  # one cutout, one bigger image or one custom result per run
         elif not var_row.winfo_manager():
             var_row.pack(fill="x", before=model_row)
+        resolution_row = self.resolution_controls.master
+        if self.generation_resolution() is not None:
+            if not resolution_row.winfo_manager():
+                resolution_row.pack(fill="x", after=model_row, pady=ui.px((8, 0)))
+        elif resolution_row.winfo_manager():
+            resolution_row.pack_forget()
         parts: list[tk.Misc] = [self.modes, self.context_row]
         if self._shown.get("cloud_note"):
             parts.append(self.cloud_line)
         if key == "remove":
             parts.append(self.remove_line)
+            parts.append(self.auto_lasso)
+            parts.append(self.brush_tools)
         if key == "bgremove":
             parts.append(self.bg_line)
         if key == "upscale":
@@ -1216,6 +1259,24 @@ class Bar:
         self.var_seg.set(n)
         self.prefs["variations"] = n
 
+    def pick_resolution(self, value: int) -> None:
+        mp = generation_megapixels(value)
+        if mp is not None:
+            self.resolution_mp = mp
+            self.resolution_seg.set(mp)
+            self.prefs["megapixels"] = mp
+            self._save_prefs()
+
+    def generation_resolution(self, model: str | None = None) -> int | None:
+        model = model if model is not None else self._model()
+        if (
+            self.tab.get() in WHOLE_IMAGE
+            or self.service.app.uses_cloud
+            or model in (*PROMPT_FREE, "default", "lama", "mat")
+        ):
+            return None
+        return self.resolution_mp
+
     def _fetch_thumbnail(self, key: tuple) -> None:
         """The image for the Expand editor, read once per document size (off the UI thread)."""
         self._thumb_busy = True
@@ -1261,9 +1322,37 @@ class Bar:
     def _model(self) -> str:
         return self._model_ids.get(self.model_choice.get(), "active")
 
+    def _memory_choice(self) -> str | None:
+        return self._model_ids.get(self.model_choice.get())
+
+    def _sync_memory_buttons(self) -> None:
+        settings = self.service.app.settings
+        blocked = self.service.busy() or settings.backend != "comfyui" or settings.uses_remote
+        self.preload_button.set_disabled(blocked or not self._memory_choice())
+        self.free_button.set_disabled(blocked)
+
+    def _header_memory(self, kind: str) -> None:
+        settings = self.service.app.settings
+        if settings.backend != "comfyui" or settings.uses_remote or self.service.busy():
+            return
+        choice = self._memory_choice()
+        if kind == "preload" and not choice:
+            self._say(tr("pick_model"), BAD)
+            return
+        params = (
+            {"model": choice, "operation": self.tab.get(), "model_label": self.model_choice.get()}
+            if kind == "preload"
+            else {}
+        )
+        try:
+            self.service.start(kind, params)
+            self._sync_memory_buttons()
+        except Exception as err:
+            self._say(photocraft_text(str(err)), BAD)
+
     def _custom_picked(self) -> bool:
-        """The custom workflow (Advanced) is the Fill model picked: it makes one result per run."""
-        return self.tab.get() == "fill" and self._model_ids.get(self.model_choice.get()) == CUSTOM_WORKFLOW_ID
+        """A selected custom workflow makes one result per run in Fill or Remove."""
+        return self.tab.get() in ("fill", "remove") and is_custom_workflow(self._model())
 
     def _sync_custom(self) -> None:
         custom = self._custom_picked()
@@ -1277,13 +1366,15 @@ class Bar:
         choice; a removal model picked in Fill is used for that run only)."""
         self.model_choice.set(label)
         self._sync_custom()
+        if not self.view:
+            self._layout_main()
         if self.tab.get() == "remove":
             self.prefs["removal"] = label
             return
         if self.tab.get() in WHOLE_IMAGE:
             return  # BiRefNet and the upscalers never become the active fill model
         model_id = self._model_ids.get(label)
-        if model_id == CUSTOM_WORKFLOW_ID:
+        if is_custom_workflow(model_id):
             return  # the custom workflow is used when picked; it is not a catalog model
         facts = self.refresher.get()
         removers = {i for i, _n in (facts.get("models") or {}).get("remove", [])}
@@ -1315,7 +1406,12 @@ class Bar:
         if self.service.busy() or self.go.disabled:
             return
         kind, prompt = self.tab.get(), self.prompt.get().strip()
-        body: dict[str, Any] = {"variations": self.variations.get(), "seed": -1, "model": self._model()}
+        body: dict[str, Any] = {
+            "variations": self.variations.get(),
+            "seed": -1,
+            "model": self._model(),
+            "megapixels": self.generation_resolution(),
+        }
         try:
             if kind in ("fill", "remove"):
                 if not (self.watcher.snapshot().get("selection")):
@@ -1327,9 +1423,9 @@ class Bar:
                 if kind == "remove":
                     removal = self._model_ids.get(self.model_choice.get(), "default")
                     body.update(removal=removal)
-                    if removal in (*PROMPT_FREE, "default"):
+                    if removal in (*PROMPT_FREE, "default") or is_custom_workflow(removal):
                         body.update(variations=1)  # same input, same result: one is enough
-                elif body["model"] == CUSTOM_WORKFLOW_ID:
+                elif is_custom_workflow(body["model"]):
                     body.update(variations=1)  # the custom workflow makes one result per run
                 self.service.start("fill", body)
             elif kind == "bgremove":
@@ -1462,7 +1558,7 @@ class Bar:
         tab = self.tab.get()
         models = facts.get("models") or {}
         if tab == "remove":
-            has_any = bool(models.get("remove") or models.get("fill"))
+            has_any = bool(models.get("remove") or models.get("fill") or facts.get("custom_remove"))
             choices = removal_choices(facts) if has_any else {}
             wanted = self.prefs.get("removal", "")
         else:
@@ -1485,6 +1581,7 @@ class Bar:
         self._sync_custom()
         busy = self.service.busy()
         self.go.set(disabled=busy or (bool(facts) and not names))
+        self._sync_memory_buttons()
 
     def _context_base(self) -> tuple[str, str, str]:
         """(text, colour, icon) for the line under the modes."""
@@ -1544,9 +1641,61 @@ class Bar:
         try:
             self._follow()
             self._update()
+            self._auto_lasso_tick()
             self._keep_on_screen()
         finally:
             self.root.after(250, self._tick)
+
+    def _arm_auto_lasso(self, *_):
+        # Enabling the option never applies the last existing selection.
+        self._last_lasso = self.watcher.snapshot().get("lasso_event")
+
+    def _auto_lasso_tick(self):
+        snap = self.watcher.snapshot()
+        event = snap.get("lasso_event")
+        previous, self._last_lasso = self._last_lasso, event
+        if (
+            not event
+            or event == previous
+            or snap.get("waiting")
+            or not self.auto_lasso.get()
+            or self.tab.get() != "remove"
+            or self.view
+            or self.collapsed
+            or not self.root.winfo_viewable()
+            or self.service.busy()
+            or self.service.app.settings.backend != "comfyui"
+            or self.service.app.settings.uses_remote
+        ):
+            return
+        model = self._model_ids.get(self.model_choice.get())
+        if not model:
+            return
+        try:
+            self.service.start(
+                "fill",
+                {
+                    "remove": True,
+                    "removal": model,
+                    "variations": 1,
+                    "megapixels": self.generation_resolution(model),
+                    "expected_target": event,
+                    "auto_lasso": True,
+                },
+            )
+        except Exception as err:
+            self._say(str(err), BAD)
+
+    def _open_smart_brush(self):
+        from .smart_brush import BrushWindow
+
+        if self.service.app.settings.backend != "comfyui" or self.service.app.settings.uses_remote:
+            self._say(tr("brush_local"), BAD)
+            return
+        if self._brush_window is not None and self._brush_window.win.winfo_exists():
+            self._brush_window.win.lift()
+        else:
+            self._brush_window = BrushWindow(self)
 
     def _engine_status(self, facts: dict[str, Any]) -> str:
         engine = self.service.engine
@@ -1589,10 +1738,11 @@ class Bar:
         if not self.view:
             self._update_context()
             self._fill_models()
+            self._layout_main()
         status = self._engine_status(facts)
         if self._shown.get("status") != status:
             self._shown["status"] = status
-            self.status.configure(text=ui.ellipsize(status, self.small, ui.px(200)))
+            self.status.configure(text=ui.ellipsize(status, self.small, ui.px(135)))
             self.status_dot.configure(image=ui.dot(status_color(status), BG))
         self._update_setup(facts)
         if facts.get("rows") is not self._shown.get("rows") or self.view:
@@ -1603,7 +1753,16 @@ class Bar:
         st = self.service.state.snapshot()
         if self.collapsed:
             if st["state"] == "running":
-                kind = "Remove" if (st["title"] or "").startswith(("Remove", "Object")) else None
+                kind = (
+                    "Remove"
+                    if (st["title"] or "").startswith(("Remove", "Object"))
+                    or st["title"]
+                    in (
+                        tr("brush"),
+                        tr("remove_now"),
+                    )
+                    else None
+                )
                 kind = kind or {"fill": "Fill", "expand": "Expand", "txt2img": "Create"}.get(st["kind"], "Working")
                 self._draw_pill(f"{kind}: {int(st['fraction'] * 100)}%", ACCENT, st["fraction"])
             elif st["state"] == "done" and len(st["variations"]) > 1:
@@ -1612,6 +1771,7 @@ class Bar:
                 self._draw_pill(status, status_color(status), None)
         self._update_job(st)
         self._layout_footer()
+        self._sync_memory_buttons()
         if st["state"] != self._last_state and st["state"] in ("done", "error"):
             self.refresher.wake.set()
         self._last_state = st["state"]

@@ -1,4 +1,5 @@
 # OpenFill - generative fill for GIMP 3
+# Modified in the PhotoCraft Workflow Tools fork.
 # Copyright (C) 2026 Beckett Harriman
 # SPDX-License-Identifier: Apache-2.0
 """ComfyUI workflow builders (API "prompt" format).
@@ -29,6 +30,7 @@ class Capabilities:
     native_lama: bool = False  # OpenFill's own node pack (OpenFillLamaNative) is loaded
     bg_removal: bool = False  # ComfyUI's own BiRefNet nodes (RemoveBackground) are on the server
     seedvr2: bool = False  # ComfyUI's own SeedVR2 nodes (ComfyUI 0.39 and newer)
+    direct_lama: bool = False  # the verified bundled loader needs no other node pack
 
 
 class Graph:
@@ -990,6 +992,7 @@ ERASER_PROMPTS = {
 
 # OpenFill's own node (comfy_nodes): LaMa at the image's own resolution.
 NATIVE_LAMA_NODE = "OpenFillLamaNative"
+DIRECT_LAMA_LOADER = "OpenFillLoadBigLama"
 NATIVE_LAMA_OVERLAP = 256  # px of overlap between windows when one pass does not fit
 
 
@@ -1005,12 +1008,16 @@ def build_removal(
     crop's own resolution (one pass, or large overlapping windows at 1:1 when the
     graphics memory is short; see comfy_nodes); MAT, or LaMa on a server without that
     node, through comfyui-inpaint-nodes' Inpaint (using Model)."""
-    if not caps.inpaint_nodes:
+    native = req.model.native_lama and caps.native_lama and not _tiles(req)
+    if not caps.inpaint_nodes and not (native and caps.direct_lama):
         raise ValueError("prompt-free removal needs comfyui-inpaint-nodes on the server")
     g = Graph()
-    if req.model.native_lama and caps.native_lama and not _tiles(req):
+    if native:
         image, mask = _load_inputs(g, req, image_ref, mask_ref, caps)
-        g.add("inpaint_model", "INPAINT_LoadInpaintModel", model_name=req.model.inpaint_model)
+        if caps.direct_lama:
+            g.add("inpaint_model", DIRECT_LAMA_LOADER, model_name=req.model.inpaint_model)
+        else:
+            g.add("inpaint_model", "INPAINT_LoadInpaintModel", model_name=req.model.inpaint_model)
         g.add(
             "remove",
             NATIVE_LAMA_NODE,
@@ -1248,6 +1255,7 @@ def build_custom(
         (req.width, req.height),
         (req.work_width, req.work_height),
         filename_prefix,
+        megapixels=req.megapixels,
     )
 
 
@@ -1425,6 +1433,7 @@ NODE_CLASSES = frozenset(
         "INPAINT_InpaintWithModel",
         "INPAINT_LoadFooocusInpaint",
         "INPAINT_LoadInpaintModel",
+        DIRECT_LAMA_LOADER,
         "INPAINT_MaskedBlur",
         "INPAINT_MaskedFill",
         "INPAINT_StabilizeMask",

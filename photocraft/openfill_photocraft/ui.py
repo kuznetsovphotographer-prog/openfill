@@ -1,4 +1,5 @@
 # OpenFill for PhotoCraft
+# Modified in the PhotoCraft Workflow Tools fork.
 # SPDX-License-Identifier: Apache-2.0
 """OpenFill's look in Tk: the design's colours, type and sizes, its icons, and the controls
 the bar is made of (segmented controls, buttons, inputs, the prompt box, selects, cards,
@@ -210,6 +211,8 @@ ICONS: dict[str, list[tuple]] = {
     "image": [("rect", 3, 3, 18, 18, 2, None), ("circle", 8.5, 8.5, 1.5), ("path", "M21 15l-5-5L5 21")],
     "trash": [("path", "M3 6h18"), ("path", "M8 6V4h8v2"), ("path", "M19 6l-1 14H6L5 6")],
     "download": [("path", "M12 3v12"), ("path", "M7 10l5 5 5-5"), ("path", "M5 21h14")],
+    "memory-load": [("path", "M12 3v11 M7 9l5 5 5-5"), ("path", "M4 14v6h16v-6")],
+    "memory-free": [("path", "M12 15V4 M7 9l5-5 5 5"), ("path", "M4 14v6h16v-6")],
     "arrow": [("path", "M5 12h14"), ("path", "M12 5l7 7-7 7")],
 }
 
@@ -743,30 +746,111 @@ class IconButton(tk.Canvas):
     SIZE = px(28)
 
     def __init__(
-        self, parent: tk.Misc, name: str, command: Callable[[], Any] | None = None, bg: str = BG, active: bool = False
+        self,
+        parent: tk.Misc,
+        name: str,
+        command: Callable[[], Any] | None = None,
+        bg: str = BG,
+        active: bool = False,
+        *,
+        tooltip: str = "",
     ) -> None:
         s = self.SIZE
         super().__init__(parent, width=s, height=s, bg=bg, bd=0, highlightthickness=0, cursor="hand2")
         self.name, self.command, self.bgc, self.active, self.hover = name, command, bg, active, False
+        self.disabled = self.focused = False
+        self.tooltip = tooltip
+        self._tip_timer = self._tip = None
         self.bind("<Enter>", lambda _e: self._set_hover(True))
         self.bind("<Leave>", lambda _e: self._set_hover(False))
         self.bind("<ButtonRelease-1>", lambda e: self.invoke() if 0 <= e.x < s and 0 <= e.y < s else None)
+        if tooltip:
+            self.configure(takefocus=True)
+            self.bind("<FocusIn>", lambda _e: self._focus(True))
+            self.bind("<FocusOut>", lambda _e: self._focus(False))
+            self.bind("<Return>", self._key_activate)
+            self.bind("<space>", self._key_activate)
+            self.bind("<Unmap>", lambda _e: self._hide_tip())
+            self.bind("<Destroy>", lambda _e: self._hide_tip())
         self._draw()
 
     def _draw(self) -> None:
         self.delete("all")
-        filled = self.active or self.hover
+        filled = not self.disabled and (self.active or self.hover or self.focused)
         back = PANEL if filled else self.bgc
         if filled:
             self.create_image(0, 0, image=rrect(self.SIZE, self.SIZE, px(4), PANEL, self.bgc), anchor="nw")
         inset = (self.SIZE - px(16)) // 2
         self.create_image(
-            inset, inset, image=icon(self.name, TEXT if self.active or self.hover else DIM, px(16), back), anchor="nw"
+            inset,
+            inset,
+            image=icon(self.name, PLACEHOLDER_FG if self.disabled else TEXT if filled else DIM, px(16), back),
+            anchor="nw",
         )
+        if self.focused and not self.disabled:
+            self.create_rectangle(1, 1, self.SIZE - 2, self.SIZE - 2, outline=ACCENT)
 
     def _set_hover(self, on: bool) -> None:
         self.hover = on
         self._draw()
+        if on:
+            self._schedule_tip()
+        else:
+            self._hide_tip()
+
+    def _focus(self, on: bool) -> None:
+        self.focused = on
+        self._draw()
+        if on:
+            self._schedule_tip()
+        else:
+            self._hide_tip()
+
+    def _key_activate(self, _event) -> str:
+        self.invoke()
+        return "break"
+
+    def _schedule_tip(self) -> None:
+        if self.tooltip and self._tip_timer is None and self._tip is None:
+            self._tip_timer = self.after(420, self._show_tip)
+
+    def _show_tip(self) -> None:
+        self._tip_timer = None
+        if not self.winfo_viewable() or not (self.hover or self.focused):
+            return
+        tip = self._tip = tk.Toplevel(self, bg=LINE)
+        tip.wm_overrideredirect(True)
+        tip.wm_attributes("-topmost", True)
+        label = tk.Label(
+            tip,
+            text=self.tooltip,
+            bg=PANEL,
+            fg=TEXT,
+            font=fonts(self).small,
+            wraplength=px(250),
+            justify="left",
+            padx=px(8),
+            pady=px(5),
+        )
+        label.pack(padx=1, pady=1)
+        x = max(0, self.winfo_rootx() + self.winfo_width() - label.winfo_reqwidth())
+        y = self.winfo_rooty() + self.winfo_height() + px(4)
+        tip.wm_geometry(f"+{x}+{y}")
+
+    def _hide_tip(self) -> None:
+        if self._tip_timer is not None:
+            self.after_cancel(self._tip_timer)
+            self._tip_timer = None
+        if self._tip is not None:
+            if self._tip.winfo_exists():
+                self._tip.destroy()
+            self._tip = None
+
+    def set_disabled(self, on: bool) -> None:
+        if on != self.disabled:
+            self.disabled = on
+            self.configure(cursor="" if on else "hand2", takefocus=bool(self.tooltip and not on))
+            self._draw()
 
     def set_active(self, on: bool) -> None:
         if on != self.active:
@@ -774,7 +858,8 @@ class IconButton(tk.Canvas):
             self._draw()
 
     def invoke(self) -> Any:
-        return self.command() if self.command else None
+        self._hide_tip()
+        return self.command() if self.command and not self.disabled else None
 
 
 class Field(tk.Canvas):

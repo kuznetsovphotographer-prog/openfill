@@ -1,4 +1,5 @@
 # OpenFill for PhotoCraft
+# Modified in the PhotoCraft Workflow Tools fork.
 # SPDX-License-Identifier: Apache-2.0
 """Models and settings, behind the panel's gear: three sections.
 
@@ -20,6 +21,7 @@ import tkinter as tk
 from typing import TYPE_CHECKING, Any
 
 from . import about, ui
+from .localization import tr
 from .service import photocraft_text
 from .ui import BAD, BG, CW, DIM, OK, WARN
 
@@ -634,6 +636,17 @@ class EngineView(tk.Frame):
         box.pack(fill="x", pady=ui.px((12, 0)))
         self.autostart = ui.Checkbox(parent, f"Start the AI engine with {self.bar.host}")
         self.autostart.pack(anchor="w", pady=ui.px((12, 0)))
+        memory = ui.frame(parent)
+        memory.pack(fill="x", pady=ui.px((12, 0)))
+        ui.caption(memory, tr("vram")).pack(anchor="w")
+        controls = ui.frame(memory)
+        controls.pack(anchor="w", pady=ui.px((5, 0)))
+        self.preload = ui.Button(controls, tr("preload") + " ▾", self._preload_menu, width=ui.px(145))
+        self.preload.pack(side="left")
+        self.memory_unload = ui.Button(controls, tr("unload"), lambda: self._memory("vram-free"), width=ui.px(145))
+        self.memory_unload.pack(side="left", padx=ui.px((6, 0)))
+        self.memory_status = ui.small(memory, tr("vram_hint"))
+        self.memory_status.pack(fill="x", pady=ui.px((4, 0)))
 
         def idle_row(box):
             row = ui.frame(box)
@@ -723,6 +736,38 @@ class EngineView(tk.Frame):
 
     def stop(self) -> None:
         self.say(self.bar.service.stop_engine(), DIM)
+
+    def _preload_menu(self):
+        from .vram import preload_choices
+
+        options = preload_choices(self.bar.service.app)
+        if not options:
+            self.memory_status.configure(text=tr("no_models"))
+            return
+        menu = tk.Menu(self.preload, tearoff=False)
+        for key, label in options.items():
+            menu.add_command(label=label, command=lambda key=key: self._memory("preload", key))
+        try:
+            menu.tk_popup(self.preload.winfo_rootx(), self.preload.winfo_rooty() + self.preload.winfo_height())
+        finally:
+            menu.grab_release()
+
+    def _memory(self, kind, model=""):
+        try:
+            self.bar.service.start(kind, {"model": model})
+            self.memory_status.configure(text=tr("vram_work"))
+            self.after(250, self._memory_text)
+        except Exception as exc:
+            self.memory_status.configure(text=str(exc))
+
+    def _memory_text(self):
+        st = self.bar.service.state.snapshot()
+        if st.get("kind") not in ("preload", "vram-free"):
+            return
+        key = "vram_work" if self.bar.service.busy() else "done"
+        self.memory_status.configure(text=st.get("message") or tr(key))
+        if self.bar.service.busy():
+            self.after(250, self._memory_text)
 
     def logs(self) -> None:
         self.bar.service.app.open_log_folder()

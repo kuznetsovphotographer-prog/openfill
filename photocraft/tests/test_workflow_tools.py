@@ -17,10 +17,39 @@ from openfill_photocraft.selection_regions import split_selection  # noqa: E402
 from openfill_photocraft.smart_brush import paint_mask  # noqa: E402
 
 from openfill import custom_workflow, geometry, named_fill, workflow  # noqa: E402
+from openfill.app import App  # noqa: E402
 from openfill.backend import ModelSpec  # noqa: E402
 
 
 class WorkflowToolsTests(unittest.TestCase):
+    def test_rorem_ignores_megapixel_override_but_flux_honors_it(self) -> None:
+        """Do not alter RORem's standard profile even when a caller sends an MP value."""
+        settings = SimpleNamespace(max_side_sdxl=1024)
+        app = SimpleNamespace(settings=settings, uses_cloud=False)
+        rorem = ModelSpec(arch="sdxl", template="sdxl_eraser")
+        standard = App.profile_for(app, rorem)
+        for mp in (1, 2, 3, 4):
+            self.assertEqual(App.profile_for(app, rorem, mp), standard)
+        flux = ModelSpec(arch="flux", template="flux_fill")
+        self.assertEqual(App.profile_for(app, flux, 4).megapixels, 4)
+
+    def test_rorem_hides_resolution_and_leaves_other_model_preference_untouched(self) -> None:
+        """Switching away from RORem restores the previously chosen MP value."""
+        try:
+            from openfill_photocraft.bar import Bar
+        except ImportError:
+            self.skipTest("no tkinter")
+        panel = SimpleNamespace(
+            _model=lambda: "rorem-sdxl",
+            tab=SimpleNamespace(get=lambda: "remove"),
+            service=SimpleNamespace(app=SimpleNamespace(uses_cloud=False)),
+            resolution_mp=3,
+        )
+        self.assertIsNone(Bar.generation_resolution(panel))
+        self.assertIsNone(Bar.generation_resolution(panel, "rorem-sdxl"))  # smart brush passes the ID
+        for choice in ("flux1-fill-dev-fp8", "custom-workflow:flux2-klein", "custom-workflow:qwen-edit"):
+            self.assertEqual(Bar.generation_resolution(panel, choice), 3)
+
     def test_resolution_in_flux_and_custom_workflows(self) -> None:
         """All three graphs receive the new work size and keep the output bounds."""
         presets = named_fill.load(ROOT / "photocraft" / "examples")

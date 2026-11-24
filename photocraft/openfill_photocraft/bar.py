@@ -1272,7 +1272,7 @@ class Bar:
         if (
             self.tab.get() in WHOLE_IMAGE
             or self.service.app.uses_cloud
-            or model in (*PROMPT_FREE, "default", "lama", "mat")
+            or model in (*PROMPT_FREE, "default", "lama", "mat", "rorem-sdxl")
         ):
             return None
         return self.resolution_mp

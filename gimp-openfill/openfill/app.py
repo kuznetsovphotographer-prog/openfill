@@ -740,7 +740,10 @@ class App:
         else:
             max_side = self.settings.max_side_sdxl
         profile = replace(base, max_side=max(base.min_side, int(max_side)))
-        return profile if model.prompt_free or self.uses_cloud else geometry.with_megapixels(profile, megapixels)
+        # RORem uses the original SDXL eraser profile and native-scale tile planning.
+        if model.prompt_free or model.effective_template == "sdxl_eraser" or self.uses_cloud:
+            return profile
+        return geometry.with_megapixels(profile, megapixels)
 
     def sampling(self, model: ModelSpec, variations: int, seed: int, denoise: float | None = None) -> Sampling:
         steps, cfg = int(self.settings.steps), float(self.settings.cfg)

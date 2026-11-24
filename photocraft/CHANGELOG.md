@@ -11,6 +11,7 @@ Each entry from now on says which PhotoCraft versions it works with.
 ## [Workflow Tools] — community changes based on 0.2.7
 
 - Add an explicit 1–4 MP generation resolution beneath Model, including named local Klein and Qwen workflows.
+- Keep RORem on its standard sizing in Remove and the smart brush; it does not offer the MP selector.
 - Preload the selected model and release the local ComfyUI cache from the panel header.
 - Add a zoomable smart removal brush and opt-in automatic removal after a completed lasso.
 - Generate disconnected Fill, Remove and Create → Layer selections in separate layers. Keep finished areas after cancellation.

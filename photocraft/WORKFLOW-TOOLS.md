@@ -6,7 +6,7 @@ An unofficial fork of Beckett Harriman's OpenFill for PhotoCraft 0.2.7. This bra
 
 1. Download the fork branch as source or clone it. Run `photocraft/Install OpenFill for PhotoCraft.cmd` on Windows, or use the [upstream installation guide](README.md) for the corresponding platform. Installing the fork replaces the same OpenFill application files as upstream; it is not a second independent installation. Close PhotoCraft and OpenFill before switching between builds and back up existing customizations first.
 2. Open **PhotoCraft with OpenFill**. Select your existing ComfyUI installation in **Settings → Engine** and reuse its models. Windows was the development environment; the fork has not been independently validated on Linux or macOS.
-3. In a diffusion-supported tab, choose **Model → Resolution (1, 2, 3 or 4 MP)**. This changes the model's working resolution, not the source document or selection. The actual pixel count depends on aspect ratio and model alignment. Try 1 MP first: higher settings require more VRAM and do not guarantee a better result. Native LaMa/MAT, Cutout and Upscale retain their own sizing.
+3. For models that support it, choose **Model → Resolution (1, 2, 3 or 4 MP)**. This changes the model's working resolution, not the source document or selection. The actual pixel count depends on aspect ratio and model alignment. Try 1 MP first: higher settings require more VRAM and do not guarantee a better result. RORem always uses OpenFill's standard SDXL eraser sizing, including in the smart brush. Native LaMa/MAT, Cutout and Upscale also retain their own sizing.
 
 ## Local retouching
 
